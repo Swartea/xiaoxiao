@@ -1,0 +1,22 @@
+{
+  "name": "novel-factory",
+  "private": true,
+  "version": "0.1.0",
+  "scripts": {
+    "dev": "turbo run dev --parallel",
+    "build": "turbo run build",
+    "lint": "turbo run lint",
+    "test": "turbo run test",
+    "typecheck": "turbo run typecheck",
+    "db:generate": "pnpm --filter @novel-factory/api db:generate",
+    "db:migrate": "pnpm --filter @novel-factory/api db:migrate",
+    "db:push": "pnpm --filter @novel-factory/api db:push"
+  },
+  "devDependencies": {
+    "@prisma/client": "6.19.2",
+    "prisma": "6.19.2",
+    "turbo": "^2.4.4",
+    "typescript": "^5.8.2"
+  },
+  "packageManager": "pnpm@10.29.3"
+}
