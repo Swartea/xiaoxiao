@@ -19,10 +19,22 @@ export class WorkspaceService {
       this.prisma.chapterVersion.findFirst({
         where: { chapter_id: chapterId },
         orderBy: { version_no: "desc" },
+        select: {
+          id: true,
+          version_no: true,
+          stage: true,
+          created_at: true,
+        },
       }),
       this.prisma.chapterVersion.findMany({
         where: { chapter_id: chapterId },
         orderBy: { version_no: "desc" },
+        select: {
+          id: true,
+          version_no: true,
+          stage: true,
+          created_at: true,
+        },
       }),
       this.prisma.generationContextSnapshot.findFirst({
         where: { chapter_id: chapterId },

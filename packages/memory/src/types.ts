@@ -16,7 +16,15 @@ export type RetrievedMemoryPackage = {
   bibleRules: RetrievedItem<{ text: string }> [];
   glossary: RetrievedItem<{ term: string; canonical_form: string; notes?: string | null }> [];
   recentSummaries: RetrievedItem<{ chapter_no: number; summary: string }> [];
-  characterSnapshots: RetrievedItem<{ id: string; name: string; state_snapshot: unknown; key_traits: string[] }> [];
+  characterSnapshots: RetrievedItem<{
+    id: string;
+    name: string;
+    visual_anchors?: string | null;
+    personality_tags?: string | null;
+    current_status?: string | null;
+    state_snapshot: unknown;
+    key_traits: string[];
+  }> [];
   relationshipSlice: RetrievedItem<{ from: string; to: string; type: string; intensity: number; notes?: string | null }> [];
   facts: RetrievedItem<{ fact_id: string; content: string; chapter_no: number; known_by_character_ids?: string[] }> [];
   seeds: RetrievedItem<{ seed_id: string; content: string; status: string; planted_chapter_no: number }> [];
@@ -43,6 +51,13 @@ export type ExtractedMemory = {
   seeds_added: Array<{ content: string; planned_payoff_chapter_no?: number | null }>;
   timeline_events_added: Array<{ time_mark: string; event: string }>;
   character_state_snapshot: Record<string, unknown>;
+  character_status_updates?: Array<{
+    character_id?: string;
+    character_name?: string;
+    from_status?: string | null;
+    to_status: string;
+    source_span?: { from: number; to: number };
+  }>;
   needs_manual_review: boolean;
   review_notes?: string;
 };

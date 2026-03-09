@@ -12,6 +12,10 @@ import { GenerationController } from "./generation/generation.controller";
 import { GenerationService } from "./generation/generation.service";
 import { WorkspaceController } from "./workspace/workspace.controller";
 import { WorkspaceService } from "./workspace/workspace.service";
+import { OutlineController } from "./outline/outline.controller";
+import { OutlineService } from "./outline/outline.service";
+import { BootstrapController } from "./bootstrap/bootstrap.controller";
+import { BootstrapService } from "./bootstrap/bootstrap.service";
 
 @Module({
   imports: [
@@ -25,7 +29,24 @@ import { WorkspaceService } from "./workspace/workspace.service";
       ],
     }),
   ],
-  controllers: [ProjectsController, BibleController, ChaptersController, GenerationController, WorkspaceController],
-  providers: [PrismaService, ProjectsService, BibleService, ChaptersService, GenerationService, WorkspaceService],
+  controllers: [
+    ProjectsController,
+    BibleController,
+    ChaptersController,
+    GenerationController,
+    WorkspaceController,
+    OutlineController,
+    BootstrapController,
+  ],
+  providers: [
+    PrismaService,
+    ProjectsService,
+    BibleService,
+    ChaptersService,
+    GenerationService,
+    WorkspaceService,
+    OutlineService,
+    BootstrapService,
+  ],
 })
 export class AppModule {}

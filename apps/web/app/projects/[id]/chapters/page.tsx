@@ -1,6 +1,7 @@
 "use client";
 
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
@@ -10,9 +11,11 @@ import { API_BASE } from "@/lib/api";
 type Props = { params: Promise<{ id: string }> };
 
 export default function ChaptersPage({ params }: Props) {
+  const router = useRouter();
   const [projectId, setProjectId] = useState("");
   const [chapters, setChapters] = useState<any[]>([]);
   const [nextNo, setNextNo] = useState(1);
+  const [loadingTemplate, setLoadingTemplate] = useState(false);
 
   async function load(id: string) {
     const res = await fetch(`${API_BASE}/projects/${id}/chapters`);
@@ -38,6 +41,23 @@ export default function ChaptersPage({ params }: Props) {
     await load(projectId);
   }
 
+  async function createSecondTemplate() {
+    if (!projectId) return;
+    setLoadingTemplate(true);
+    try {
+      const res = await fetch(`${API_BASE}/projects/${projectId}/chapters/second-template`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+      });
+      const data = await res.json();
+      if (res.ok) {
+        router.push(data.workspace_path ?? `/projects/${projectId}/chapters/2/workspace`);
+      }
+    } finally {
+      setLoadingTemplate(false);
+    }
+  }
+
   if (!projectId) return <main className="p-8">加载中...</main>;
 
   return (
@@ -45,7 +65,12 @@ export default function ChaptersPage({ params }: Props) {
       <ProjectNav id={projectId} />
       <div className="flex items-center justify-between">
         <h1 className="font-heading text-3xl">章节管理</h1>
-        <Button onClick={createChapter}>新建第 {nextNo} 章</Button>
+        <div className="flex items-center gap-2">
+          <Button variant="ghost" disabled={loadingTemplate} onClick={createSecondTemplate}>
+            {loadingTemplate ? "创建中..." : "自动创建第2章衔接模板"}
+          </Button>
+          <Button onClick={createChapter}>新建第 {nextNo} 章</Button>
+        </div>
       </div>
       <div className="mt-4 space-y-3">
         {chapters.map((chapter) => (

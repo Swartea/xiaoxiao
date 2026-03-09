@@ -19,6 +19,7 @@ import { createPatch } from "diff";
 import {
   buildGenerationContext,
   fallbackExtractMemory,
+  injectCharacterDepth,
   normalizedContentHash,
   parseExtractorJson,
   runContinuityCheck,
@@ -26,7 +27,13 @@ import {
   type RetrievedMemoryPackage,
 } from "@novel-factory/memory";
 import { DeepSeekProvider, OpenAiProvider, XAiProvider, type LlmProvider, type StageModelConfig } from "@novel-factory/llm";
-import { fixRequestSchema, fixResponseSchema, type FixRequest, type VersionStage as SharedVersionStage } from "@novel-factory/shared";
+import {
+  fixRequestSchema,
+  fixResponseSchema,
+  type FixRequest,
+  type GenerationContext,
+  type VersionStage as SharedVersionStage,
+} from "@novel-factory/shared";
 import { PrismaService } from "../prisma.service";
 import { CheckContinuityDto, GenerateStageDto } from "./dto";
 
@@ -35,6 +42,31 @@ type Stage = Exclude<SharedVersionStage, "fix"> | "fix";
 function textHash(text: string): string {
   return createHash("sha256").update(text).digest("hex");
 }
+
+function extractNumericAnchors(text: string, limit = 24): string[] {
+  const matches = text.match(/\d+(?:\.\d+)?/g) ?? [];
+  const unique: string[] = [];
+  for (const value of matches) {
+    if (!unique.includes(value)) {
+      unique.push(value);
+    }
+    if (unique.length >= limit) {
+      break;
+    }
+  }
+  return unique;
+}
+
+function toSafeInstruction(value: string | undefined) {
+  return (value ?? "").toLowerCase();
+}
+
+type StageBaseInput = {
+  versionId: string;
+  stage: VersionStage;
+  text: string;
+  numericAnchors: string[];
+};
 
 function scoreByMatch({
   text,
@@ -73,6 +105,57 @@ function toRequiredJson(value: unknown): Prisma.InputJsonValue {
     return {} as Prisma.InputJsonObject;
   }
   return value as Prisma.InputJsonValue;
+}
+
+const MAJOR_STATUS_KEYWORDS = [
+  "重伤",
+  "濒死",
+  "昏迷",
+  "极度恐慌",
+  "惊恐",
+  "恐慌",
+  "崩溃",
+  "失控",
+  "中毒",
+  "虚弱",
+];
+
+const BASELINE_STATUS_KEYWORDS = ["常态", "正常", "平静", "稳定", "无异常", "健康"];
+const CHAPTER_MIN_CHARS = 3000;
+const CHAPTER_MAX_CHARS = 6000;
+const ABSTRACT_TERMS_TO_WATCH = [
+  "权谋",
+  "代价",
+  "命运",
+  "未知",
+  "危机",
+  "阴影",
+  "恐惧",
+  "压迫",
+  "冰冷",
+  "沉默",
+];
+const TERM_MAX_COUNTS: Record<string, number> = {
+  "代价": 2,
+  "权谋": 1,
+  "未知": 1,
+};
+
+function roughChapterChars(text: string) {
+  return text.replace(/\s+/g, "").replace(/[#>*`~\-]/g, "").length;
+}
+
+function termCount(text: string, term: string) {
+  if (!term) return 0;
+  let count = 0;
+  let from = 0;
+  while (from < text.length) {
+    const idx = text.indexOf(term, from);
+    if (idx < 0) break;
+    count += 1;
+    from = idx + term.length;
+  }
+  return count;
 }
 
 @Injectable()
@@ -127,6 +210,95 @@ export class GenerationService {
     if (stage === "draft") return "Draft";
     if (stage === "polish") return "Polish";
     return "Fix";
+  }
+
+  private normalizeStatusValue(value: unknown): string | null {
+    if (typeof value === "string") {
+      const trimmed = value.trim();
+      return trimmed.length > 0 ? trimmed : null;
+    }
+
+    if (typeof value !== "object" || value === null) {
+      return null;
+    }
+
+    const record = value as Record<string, unknown>;
+    const candidates = [record.current_status, record.status, record.emotion, record.state, record.condition];
+    for (const candidate of candidates) {
+      if (typeof candidate === "string" && candidate.trim()) {
+        return candidate.trim();
+      }
+    }
+
+    return null;
+  }
+
+  private hasKeyword(status: string, keywords: string[]) {
+    return keywords.some((keyword) => status.includes(keyword));
+  }
+
+  private shouldPersistCharacterStatus(previousStatus: string | null | undefined, nextStatus: string) {
+    const next = nextStatus.trim();
+    const previous = previousStatus?.trim() ?? "";
+
+    if (!next || previous === next) {
+      return false;
+    }
+
+    if (this.hasKeyword(next, MAJOR_STATUS_KEYWORDS)) {
+      return true;
+    }
+
+    if (!previous || this.hasKeyword(previous, BASELINE_STATUS_KEYWORDS)) {
+      return this.hasKeyword(next, MAJOR_STATUS_KEYWORDS);
+    }
+
+    return false;
+  }
+
+  private contextCharactersForDepth(context: unknown): Array<{
+    name: string;
+    visual_anchors?: string | null;
+    personality_tags?: string | null;
+    current_status?: string | null;
+  }> {
+    if (!context || typeof context !== "object") {
+      return [];
+    }
+
+    const involved = (context as Partial<GenerationContext>).involved_characters;
+    if (!Array.isArray(involved)) {
+      return [];
+    }
+
+    return involved
+      .map((item) => {
+        if (!item || typeof item !== "object" || typeof item.name !== "string") {
+          return null;
+        }
+        return {
+          name: item.name,
+          visual_anchors:
+            typeof item.visual_anchors === "string"
+              ? item.visual_anchors
+              : item.visual_anchors === null
+                ? null
+                : undefined,
+          personality_tags:
+            typeof item.personality_tags === "string"
+              ? item.personality_tags
+              : item.personality_tags === null
+                ? null
+                : undefined,
+          current_status:
+            typeof item.current_status === "string"
+              ? item.current_status
+              : item.current_status === null
+                ? null
+                : undefined,
+        };
+      })
+      .filter((item): item is NonNullable<typeof item> => item !== null);
   }
 
   private async resolveChapter(chapterId: string) {
@@ -347,18 +519,23 @@ export class GenerationService {
         data: {
           id: character.id,
           name: character.name,
+          visual_anchors: character.visual_anchors,
+          personality_tags: character.personality_tags,
+          current_status: character.current_status,
           state_snapshot: stateSnapshot[character.id] ?? {},
-          key_traits: [character.personality, character.motivation].filter(Boolean) as string[],
+          key_traits: [character.personality, character.personality_tags, character.motivation]
+            .filter(Boolean)
+            .map((item) => String(item)),
         },
         rank: 0,
         score: scoreByMatch({
-          text: `${character.name} ${character.personality ?? ""} ${character.motivation ?? ""}`,
+          text: `${character.name} ${character.personality ?? ""} ${character.personality_tags ?? ""} ${character.visual_anchors ?? ""} ${character.current_status ?? ""} ${character.motivation ?? ""}`,
           queryEntities: resolvedEntities,
           recencyDelta: 0,
           typeWeight: 10,
         }),
-        source_table: "chapter_memory",
-        source_id: latestMemory?.id ?? character.id,
+        source_table: "characters",
+        source_id: character.id,
       }))
       .sort((a, b) => b.score - a.score)
       .map((item, index) => ({ ...item, rank: index + 1 }));
@@ -489,25 +666,116 @@ export class GenerationService {
     };
   }
 
-  private buildGenerationPrompt(stage: Stage, chapter: Chapter, context: unknown, instruction?: string) {
+  private async resolveBaseInput(chapterId: string, stage: Exclude<Stage, "fix">): Promise<StageBaseInput | null> {
+    if (stage === "beats") {
+      return null;
+    }
+
+    let baseVersion: ChapterVersion | null = null;
+
+    if (stage === "draft") {
+      baseVersion = await this.prisma.chapterVersion.findFirst({
+        where: {
+          chapter_id: chapterId,
+          stage: VersionStage.beats,
+        },
+        orderBy: { version_no: "desc" },
+      });
+    } else if (stage === "polish") {
+      baseVersion = await this.prisma.chapterVersion.findFirst({
+        where: {
+          chapter_id: chapterId,
+          stage: {
+            in: [VersionStage.draft, VersionStage.fix, VersionStage.polish],
+          },
+        },
+        orderBy: { version_no: "desc" },
+      });
+    }
+
+    if (!baseVersion) {
+      baseVersion = await this.prisma.chapterVersion.findFirst({
+        where: { chapter_id: chapterId },
+        orderBy: { version_no: "desc" },
+      });
+    }
+
+    if (!baseVersion) {
+      return null;
+    }
+
+    return {
+      versionId: baseVersion.id,
+      stage: baseVersion.stage,
+      text: baseVersion.text,
+      numericAnchors: extractNumericAnchors(baseVersion.text),
+    };
+  }
+
+  private buildGenerationPrompt(
+    stage: Stage,
+    chapter: Chapter,
+    context: unknown,
+    instruction?: string,
+    baseInput?: StageBaseInput | null,
+  ) {
     const stageIntent: Record<Stage, string> = {
       beats: "输出场景骨架，每个场景都要明确冲突与转折",
-      draft: "扩写为章节初稿，保持人物信息边界与术语一致",
-      polish: "润色语言节奏并去除机械表达，不改动关键事实",
+      draft: "基于场景骨架扩写为章节初稿，保持人物信息边界与术语一致，章节字数控制在 3000-6000 字",
+      polish: "基于已有正文润色语言节奏，不改动关键事实和数字锚点，章节字数控制在 3000-6000 字",
       fix: "按修复目标重写指定范围文本，保证上下文衔接",
     };
 
+    const depthConstraint =
+      stage === "beats" || stage === "draft"
+        ? injectCharacterDepth(this.contextCharactersForDepth(context))
+        : "";
+
+    const systemLines = [
+      "你是中文小说创作引擎。",
+      "必须遵守 GenerationContext 中的约束、术语、时间线和人物状态。",
+      "不得凭空引入未在 context 中出现的关键设定。",
+    ];
+    if (depthConstraint) {
+      systemLines.push(depthConstraint);
+    }
+    if (stage === "draft" || stage === "polish" || stage === "fix") {
+      systemLines.push("语言风格：减少堆叠修饰词和空泛形容，优先动作、对白、具体细节。");
+      systemLines.push("避免高频 AI 味表达：避免连续使用“仿佛/宛如/骤然/蓦地/极其/非常/无比”等副词形容词堆叠。");
+      systemLines.push("段落控制：单段尽量不超过 4 句，避免同义反复和句式复读。");
+      systemLines.push("禁止元叙述：不得出现“故事基调是…/本章主题是…/读者看到…”这类跳出故事的句子。");
+    }
+    if (stage === "draft" && baseInput?.text) {
+      systemLines.push("draft 阶段：必须承接 BaseText 中已有骨架与场景顺序，不得跳过关键场景。");
+      systemLines.push(`目标字数：${CHAPTER_MIN_CHARS}-${CHAPTER_MAX_CHARS} 字（汉字近似计数）。`);
+    }
+    if (stage === "polish" && baseInput?.text) {
+      systemLines.push("polish 阶段：只做表达优化，不得重写剧情，不得改动人物关系与事件顺序。");
+      systemLines.push("polish 阶段：数字、时间、年龄、金额、数量、章回编号必须保持与 BaseText 一致。");
+      systemLines.push(`目标字数：${CHAPTER_MIN_CHARS}-${CHAPTER_MAX_CHARS} 字（汉字近似计数）。`);
+    }
+
+    const baseLines: string[] = [];
+    if (baseInput?.text) {
+      baseLines.push(
+        `BaseText(version_id=${baseInput.versionId}, stage=${baseInput.stage}):`,
+        baseInput.text,
+      );
+      if (baseInput.numericAnchors.length > 0 && (stage === "draft" || stage === "polish")) {
+        baseLines.push(
+          `数字锚点（默认不得改动）: ${baseInput.numericAnchors.join("、")}`,
+        );
+      }
+    }
+
     return {
-      system: [
-        "你是中文小说创作引擎。",
-        "必须遵守 GenerationContext 中的约束、术语、时间线和人物状态。",
-        "不得凭空引入未在 context 中出现的关键设定。",
-      ].join("\n"),
+      system: systemLines.join("\n\n"),
       user: [
         `任务阶段: ${stage}`,
         `阶段目标: ${stageIntent[stage]}`,
         `章节信息: no=${chapter.chapter_no}, title=${chapter.title ?? "未命名"}`,
         instruction ? `额外指令: ${instruction}` : "",
+        ...baseLines,
         "GenerationContext(JSON):",
         JSON.stringify(context, null, 2),
         "请只输出最终文本，不要输出解释。",
@@ -517,8 +785,14 @@ export class GenerationService {
     };
   }
 
-  private async generateText(stage: Stage, chapter: Chapter, context: unknown, instruction?: string) {
-    const prompt = this.buildGenerationPrompt(stage, chapter, context, instruction);
+  private async generateText(
+    stage: Stage,
+    chapter: Chapter,
+    context: unknown,
+    instruction?: string,
+    baseInput?: StageBaseInput | null,
+  ) {
+    const prompt = this.buildGenerationPrompt(stage, chapter, context, instruction, baseInput);
 
     if (!this.provider) {
       return [
@@ -553,6 +827,84 @@ export class GenerationService {
     return result.text;
   }
 
+  private async normalizeDraftPolishLengthAndStyle(args: {
+    stage: Exclude<Stage, "fix" | "beats">;
+    chapter: Chapter;
+    text: string;
+  }) {
+    const charCount = roughChapterChars(args.text);
+    if (charCount >= CHAPTER_MIN_CHARS && charCount <= CHAPTER_MAX_CHARS) {
+      return args.text;
+    }
+    if (!this.provider) {
+      return args.text;
+    }
+
+    const target = charCount < CHAPTER_MIN_CHARS ? 3400 : 4500;
+    const direction = charCount < CHAPTER_MIN_CHARS ? "扩写" : "压缩";
+
+    const result = await this.provider.generateText({
+      model: this.modelConfig.polish,
+      system: "你是小说文本编辑器。输出连续正文，不要解释。",
+      user: [
+        `请对以下章节进行${direction}，目标约 ${target} 字，允许范围 ${CHAPTER_MIN_CHARS}-${CHAPTER_MAX_CHARS} 字。`,
+        "必须保持剧情事实、人物关系、时间线、数字信息一致。",
+        "减少修饰词堆砌，句式更自然，避免网络常见 AI 文风。",
+        "禁止输出场景小标题（如 ## 场景一）。",
+        "",
+        args.text,
+      ].join("\n"),
+      temperature: 0.4,
+      maxTokens: 3500,
+    });
+
+    return result.text;
+  }
+
+  private detectOverusedAbstractTerms(text: string) {
+    return ABSTRACT_TERMS_TO_WATCH.map((term) => ({
+      term,
+      count: termCount(text, term),
+      max: TERM_MAX_COUNTS[term] ?? 3,
+    }))
+      .filter((item) => item.count > item.max)
+      .sort((a, b) => b.count - a.count)
+      .slice(0, 6);
+  }
+
+  private async normalizeLexicalRepetition(args: {
+    text: string;
+    overused: Array<{ term: string; count: number; max: number }>;
+  }) {
+    if (!this.provider || args.overused.length === 0) {
+      return args.text;
+    }
+
+    const result = await this.provider.generateText({
+      model: this.modelConfig.polish,
+      system: "你是小说文本编辑器。输出连续正文，不要解释。",
+      user: [
+        "请只做“降重复词”编辑：在不改变剧情事实、人物关系、时间线、数字信息的前提下，减少高频抽象词重复。",
+        "优先把抽象词替换为具体动作、细节、对白或场景结果；不要机械同义词替换。",
+        "禁止出现元叙述句（如：故事基调是…）。",
+        "禁止新增场景标题（如 ## 场景一）。",
+        `需降频词与上限：${args.overused.map((item) => `${item.term}(${item.count}-><=${item.max})`).join("、")}`,
+        "",
+        args.text,
+      ].join("\n"),
+      temperature: 0.3,
+      maxTokens: 3500,
+    });
+
+    return result.text;
+  }
+
+  private shouldRunRepetitionFixLoop(request: FixRequest) {
+    const strategy = (request.strategy_id ?? "").toLowerCase();
+    const instruction = toSafeInstruction(request.instruction);
+    return strategy.includes("reduce-word-repetition") || instruction.includes("降重复词");
+  }
+
   private async extractMemoryText(text: string): Promise<ReturnType<typeof fallbackExtractMemory>> {
     if (!this.provider) {
       return fallbackExtractMemory(text);
@@ -563,7 +915,8 @@ export class GenerationService {
         model: this.modelConfig.extract,
         system: "你是小说记忆抽取器，请输出严格 JSON。",
         user: [
-          "从正文中抽取 summary, scene_list, facts_added, seeds_added, timeline_events_added, character_state_snapshot。",
+          "从正文中抽取 summary, scene_list, facts_added, seeds_added, timeline_events_added, character_state_snapshot, character_status_updates。",
+          "character_status_updates 字段用于记录角色状态重大变化，元素结构为 {character_id?, character_name?, from_status?, to_status, source_span?}。",
           "scene_list 需要 scene_index 和 anchor_span(from/to)。",
           "输出 JSON，不要 Markdown。",
           text,
@@ -612,6 +965,120 @@ export class GenerationService {
     if (report.summary.high > 0) return "high" as const;
     if (report.summary.med > 0) return "med" as const;
     return "low" as const;
+  }
+
+  private shouldGuardNumericFix(request: FixRequest) {
+    const strategy = (request.strategy_id ?? "").toLowerCase();
+    const instruction = toSafeInstruction(request.instruction);
+    return strategy.includes("numeric-consistency") || instruction.includes("numeric-consistency");
+  }
+
+  private assertNumericFixStability(baseText: string, newText: string) {
+    const baseLen = Math.max(baseText.length, 1);
+    const newLen = newText.length;
+    const ratio = newLen / baseLen;
+    if (ratio < 0.85 || ratio > 1.15) {
+      throw new UnprocessableEntityException("NUMERIC_FIX_TOO_AGGRESSIVE");
+    }
+
+    const anchors = extractNumericAnchors(baseText, 40);
+    if (anchors.length === 0) return;
+    const missing = anchors.filter((anchor) => !newText.includes(anchor));
+    // 允许少量锚点被合法清理，超过 20% 视为过度重写。
+    if (missing.length > Math.max(1, Math.floor(anchors.length * 0.2))) {
+      throw new UnprocessableEntityException("NUMERIC_ANCHOR_DROPPED");
+    }
+  }
+
+  private async applyCharacterStatusUpdates(args: {
+    chapter: Chapter;
+    version: ChapterVersion;
+    extracted: ReturnType<typeof fallbackExtractMemory>;
+  }) {
+    const { chapter, version, extracted } = args;
+    const characters = await this.prisma.character.findMany({ where: { project_id: chapter.project_id } });
+    if (characters.length === 0) {
+      return;
+    }
+
+    const byId = new Map(characters.map((character) => [character.id, character]));
+    const byName = new Map(characters.map((character) => [character.name, character]));
+
+    const resolveCharacter = (value?: string) => {
+      const normalized = value?.trim();
+      if (!normalized) return undefined;
+      if (byId.has(normalized)) return byId.get(normalized);
+      if (byName.has(normalized)) return byName.get(normalized);
+      return characters.find((character) => character.name.includes(normalized) || normalized.includes(character.name));
+    };
+
+    const nextStatusByCharacterId = new Map<string, string>();
+    const commitCandidate = (characterId: string, status: string) => {
+      const trimmed = status.trim();
+      if (!trimmed) return;
+      const existing = nextStatusByCharacterId.get(characterId);
+      if (!existing || this.hasKeyword(trimmed, MAJOR_STATUS_KEYWORDS)) {
+        nextStatusByCharacterId.set(characterId, trimmed);
+      }
+    };
+
+    for (const update of extracted.character_status_updates ?? []) {
+      const character = resolveCharacter(update.character_id) ?? resolveCharacter(update.character_name);
+      if (!character) continue;
+      const status = this.normalizeStatusValue(update.to_status);
+      if (!status) continue;
+      commitCandidate(character.id, status);
+    }
+
+    for (const [key, rawValue] of Object.entries(extracted.character_state_snapshot ?? {})) {
+      const character = resolveCharacter(key);
+      if (!character) continue;
+      const status = this.normalizeStatusValue(rawValue);
+      if (!status) continue;
+      commitCandidate(character.id, status);
+    }
+
+    const updates = Array.from(nextStatusByCharacterId.entries())
+      .map(([characterId, status]) => {
+        const character = byId.get(characterId);
+        if (!character) return null;
+        if (!this.shouldPersistCharacterStatus(character.current_status, status)) return null;
+        return {
+          id: character.id,
+          name: character.name,
+          status,
+        };
+      })
+      .filter((item): item is { id: string; name: string; status: string } => item !== null);
+
+    if (updates.length === 0) {
+      return;
+    }
+
+    await this.prisma.$transaction(async (tx) => {
+      await Promise.all(
+        updates.map((update) =>
+          tx.character.update({
+            where: { id: update.id },
+            data: { current_status: update.status },
+          }),
+        ),
+      );
+
+      await tx.timelineEvent.createMany({
+        data: updates.map((update) => ({
+          project_id: chapter.project_id,
+          time_mark: `第${chapter.chapter_no}章`,
+          event: `角色状态变化：${update.name} -> ${update.status}`,
+          involved_entities: { character_ids: [update.id] } as Prisma.InputJsonObject,
+          chapter_no_ref: chapter.chapter_no,
+          source_version_id: version.id,
+          fingerprint: normalizedContentHash(`status_update|${update.id}|${update.status}`),
+          status: extracted.needs_manual_review ? ExtractedStatus.extracted : ExtractedStatus.confirmed,
+        })),
+        skipDuplicates: true,
+      });
+    });
   }
 
   private async saveExtractedMemory(args: {
@@ -685,6 +1152,8 @@ export class GenerationService {
         skipDuplicates: true,
       });
     }
+
+    await this.applyCharacterStatusUpdates({ chapter, version, extracted });
   }
 
   private async runAndPersistContinuity(args: {
@@ -772,7 +1241,22 @@ export class GenerationService {
         orderBy: { version_no: "desc" },
       });
 
-      const generatedText = await this.generateText(stage, chapter, assembled.context, dto.instruction);
+      const baseInput = await this.resolveBaseInput(chapter.id, stage);
+      let generatedText = await this.generateText(stage, chapter, assembled.context, dto.instruction, baseInput);
+      if (stage === "draft" || stage === "polish") {
+        generatedText = await this.normalizeDraftPolishLengthAndStyle({
+          stage,
+          chapter,
+          text: generatedText,
+        });
+        const overused = this.detectOverusedAbstractTerms(generatedText);
+        if (overused.length > 0) {
+          generatedText = await this.normalizeLexicalRepetition({
+            text: generatedText,
+            overused,
+          });
+        }
+      }
 
       const version = await this.createVersion({
         chapterId: chapter.id,
@@ -789,6 +1273,9 @@ export class GenerationService {
                 : this.modelConfig.polish,
           idempotency_key: idemKey,
           context_hash: assembled.contextHash,
+          base_version_id: baseInput?.versionId ?? null,
+          base_stage: baseInput?.stage ?? null,
+          numeric_anchors: baseInput?.numericAnchors ?? [],
         },
       });
 
@@ -955,7 +1442,19 @@ export class GenerationService {
           .join("\n"),
       );
 
-      const newText = `${before}${replacement}${after}`;
+      let newText = `${before}${replacement}${after}`;
+      if (this.shouldRunRepetitionFixLoop(request)) {
+        for (let i = 0; i < 2; i += 1) {
+          const overused = this.detectOverusedAbstractTerms(newText);
+          if (overused.length === 0) {
+            break;
+          }
+          newText = await this.normalizeLexicalRepetition({ text: newText, overused });
+        }
+      }
+      if (request.mode === "rewrite_chapter" && this.shouldGuardNumericFix(request)) {
+        this.assertNumericFixStability(baseVersion.text, newText);
+      }
       const patch = {
         type: "offset_replace" as const,
         from: targetSpan.from,

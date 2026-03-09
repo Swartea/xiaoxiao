@@ -1,5 +1,6 @@
 "use client";
 
+import { useRouter } from "next/navigation";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { ProjectNav } from "@/components/project-nav";
 import { Button } from "@/components/ui/button";
@@ -13,7 +14,17 @@ function makeIdemKey() {
   return crypto.randomUUID();
 }
 
+type FixMode = "replace_span" | "rewrite_section" | "rewrite_chapter";
+
+const FIX_MODE_BY_STRATEGY_INDEX: FixMode[] = ["replace_span", "rewrite_section", "rewrite_chapter"];
+const FIX_MODE_LABELS: Record<FixMode, string> = {
+  replace_span: "局部替换",
+  rewrite_section: "场景重写",
+  rewrite_chapter: "整章重写",
+};
+
 export default function ChapterWorkspacePage({ params }: Props) {
+  const router = useRouter();
   const [projectId, setProjectId] = useState("");
   const [chapterNo, setChapterNo] = useState(0);
   const [chapterId, setChapterId] = useState("");
@@ -24,12 +35,29 @@ export default function ChapterWorkspacePage({ params }: Props) {
   const [tab, setTab] = useState<"beats" | "draft" | "polish">("draft");
   const [editorText, setEditorText] = useState("");
   const [diffData, setDiffData] = useState<any>(null);
+  const [actionError, setActionError] = useState("");
+  const [actionLoading, setActionLoading] = useState(false);
+  const [showTraceMeta, setShowTraceMeta] = useState(false);
   const monacoRef = useRef<any>(null);
+  const versionTextCacheRef = useRef<Record<string, string>>({});
+
+  async function loadVersionText(chId: string, versionId: string) {
+    if (!versionId) return "";
+    const cached = versionTextCacheRef.current[versionId];
+    if (typeof cached === "string") {
+      return cached;
+    }
+    const res = await fetch(`${API_BASE}/chapters/${chId}/versions/${versionId}`);
+    const data = await res.json();
+    const text = typeof data?.text === "string" ? data.text : "";
+    versionTextCacheRef.current[versionId] = text;
+    return text;
+  }
 
   async function reload(chId: string) {
     const [workspaceRes, versionsRes] = await Promise.all([
       fetch(`${API_BASE}/chapters/${chId}/workspace`),
-      fetch(`${API_BASE}/chapters/${chId}/versions`),
+      fetch(`${API_BASE}/chapters/${chId}/versions?meta=1`),
     ]);
 
     const workspaceData = await workspaceRes.json();
@@ -39,7 +67,12 @@ export default function ChapterWorkspacePage({ params }: Props) {
     setVersions(versionsData);
     const latest = versionsData[0];
     setSelectedVersionId(latest?.id ?? "");
-    setEditorText(latest?.text ?? "");
+    if (latest?.id) {
+      const latestText = await loadVersionText(chId, latest.id);
+      setEditorText(latestText);
+    } else {
+      setEditorText("");
+    }
   }
 
   useEffect(() => {
@@ -53,29 +86,48 @@ export default function ChapterWorkspacePage({ params }: Props) {
       const chapter = chapters.find((c: any) => c.chapter_no === noInt);
       if (!chapter) return;
       setChapterId(chapter.id);
+      versionTextCacheRef.current = {};
       await reload(chapter.id);
     })();
   }, [params]);
 
   useEffect(() => {
-    const selected = versions.find((v) => v.id === selectedVersionId);
-    if (selected) {
-      setEditorText(selected.text);
-    }
-  }, [selectedVersionId, versions]);
+    if (!selectedVersionId || !chapterId) return;
+    let cancelled = false;
+    void (async () => {
+      const text = await loadVersionText(chapterId, selectedVersionId);
+      if (!cancelled) {
+        setEditorText(text);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [chapterId, selectedVersionId]);
 
   async function runGenerate(stage: "beats" | "draft" | "polish") {
     if (!chapterId) return;
-    const res = await fetch(`${API_BASE}/chapters/${chapterId}/generate/${stage}`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "Idempotency-Key": makeIdemKey(),
-      },
-      body: JSON.stringify({ k: 50 }),
-    });
-    await res.json();
-    await reload(chapterId);
+    setActionError("");
+    setActionLoading(true);
+    try {
+      const res = await fetch(`${API_BASE}/chapters/${chapterId}/generate/${stage}`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Idempotency-Key": makeIdemKey(),
+        },
+        body: JSON.stringify({ k: 50 }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        throw new Error(data?.message || `生成失败: ${res.status}`);
+      }
+      await reload(chapterId);
+    } catch (error) {
+      setActionError(error instanceof Error ? error.message : "生成失败");
+    } finally {
+      setActionLoading(false);
+    }
   }
 
   async function runDiff() {
@@ -86,27 +138,201 @@ export default function ChapterWorkspacePage({ params }: Props) {
     setDiffData(await res.json());
   }
 
-  async function runFix(strategyId: string, issue: any) {
+  async function runRollback() {
     if (!chapterId || !selectedVersionId) return;
-    await fetch(`${API_BASE}/chapters/${chapterId}/fix`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "Idempotency-Key": makeIdemKey(),
-      },
-      body: JSON.stringify({
+    setActionError("");
+    setActionLoading(true);
+    try {
+      const res = await fetch(`${API_BASE}/chapters/${chapterId}/rollback`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ version_id: selectedVersionId }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        throw new Error(data?.message || `回滚失败: ${res.status}`);
+      }
+      await reload(chapterId);
+    } catch (error) {
+      setActionError(error instanceof Error ? error.message : "回滚失败");
+    } finally {
+      setActionLoading(false);
+    }
+  }
+
+  function resolveSceneIndexForIssue(issue: any): number | null {
+    const issueFrom = issue?.evidence?.from;
+    if (typeof issueFrom !== "number") return null;
+    const scenes = Array.isArray(workspace?.chapter_memory?.scene_list) ? workspace.chapter_memory.scene_list : [];
+    const targetScene = scenes.find((scene: any) => {
+      const from = scene?.anchor_span?.from;
+      const to = scene?.anchor_span?.to;
+      return typeof from === "number" && typeof to === "number" && issueFrom >= from && issueFrom <= to;
+    });
+    return typeof targetScene?.scene_index === "number" ? targetScene.scene_index : null;
+  }
+
+  async function runFix(issue: any, strategyIndex: number) {
+    if (!chapterId || !selectedVersionId) return;
+    setActionError("");
+    setActionLoading(true);
+    try {
+      const mode = FIX_MODE_BY_STRATEGY_INDEX[strategyIndex] ?? "replace_span";
+      const payload: Record<string, unknown> = {
         base_version_id: selectedVersionId,
-        mode: "replace_span",
-        span: {
+        mode,
+        issue_ids: [issue.issue_id],
+        strategy_id: `strategy-${strategyIndex + 1}`,
+      };
+
+      if (mode === "replace_span") {
+        payload.span = {
           from: issue.evidence.from,
           to: issue.evidence.to,
-        },
-        issue_ids: [issue.issue_id],
-        strategy_id: strategyId,
-      }),
-    });
+        };
+      } else if (mode === "rewrite_section") {
+        const sceneIndex = resolveSceneIndexForIssue(issue);
+        if (sceneIndex === null) {
+          setActionError("当前问题未定位到场景锚点，无法执行“场景重写”。请先用“局部替换”或补全 scene_list。");
+          return;
+        }
+        payload.section = { scene_index: sceneIndex };
+      }
 
-    await reload(chapterId);
+      const res = await fetch(`${API_BASE}/chapters/${chapterId}/fix`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Idempotency-Key": makeIdemKey(),
+        },
+        body: JSON.stringify(payload),
+      });
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        throw new Error(data?.message || `修复失败: ${res.status}`);
+      }
+      await reload(chapterId);
+    } catch (error) {
+      setActionError(error instanceof Error ? error.message : "修复失败");
+    } finally {
+      setActionLoading(false);
+    }
+  }
+
+  async function runNumericConsistencyFix() {
+    if (!chapterId || !selectedVersionId) return;
+    setActionError("");
+    setActionLoading(true);
+    try {
+      const res = await fetch(`${API_BASE}/chapters/${chapterId}/fix`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Idempotency-Key": makeIdemKey(),
+        },
+        body: JSON.stringify({
+          base_version_id: selectedVersionId,
+          mode: "rewrite_chapter",
+          strategy_id: "numeric-consistency",
+          instruction:
+            "仅修复前后文数字、年龄、金额、时间、数量不一致问题。禁止改动剧情走向、人物关系、伏笔。若数字无冲突则保持原文。",
+        }),
+      });
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        throw new Error(data?.message || `数字一致性修复失败: ${res.status}`);
+      }
+      await reload(chapterId);
+    } catch (error) {
+      setActionError(error instanceof Error ? error.message : "数字一致性修复失败");
+    } finally {
+      setActionLoading(false);
+    }
+  }
+
+  async function runDeduplicateCleanup() {
+    if (!chapterId || !selectedVersionId) return;
+    setActionError("");
+    setActionLoading(true);
+    try {
+      const res = await fetch(`${API_BASE}/chapters/${chapterId}/fix`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Idempotency-Key": makeIdemKey(),
+        },
+        body: JSON.stringify({
+          base_version_id: selectedVersionId,
+          mode: "rewrite_chapter",
+          strategy_id: "deduplicate-cleanup",
+          instruction:
+            "清理重复开篇与重复段落。正文中不允许出现“## 场景X”这类小标题。保留剧情事实、时间线、数字信息和人物关系不变。",
+        }),
+      });
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        throw new Error(data?.message || `清理重复段失败: ${res.status}`);
+      }
+      await reload(chapterId);
+    } catch (error) {
+      setActionError(error instanceof Error ? error.message : "清理重复段失败");
+    } finally {
+      setActionLoading(false);
+    }
+  }
+
+  async function runReduceWordRepetition() {
+    if (!chapterId || !selectedVersionId) return;
+    setActionError("");
+    setActionLoading(true);
+    try {
+      const res = await fetch(`${API_BASE}/chapters/${chapterId}/fix`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Idempotency-Key": makeIdemKey(),
+        },
+        body: JSON.stringify({
+          base_version_id: selectedVersionId,
+          mode: "rewrite_chapter",
+          strategy_id: "reduce-word-repetition",
+          instruction:
+            "减少重复抽象词（如权谋、代价、命运、未知）的出现频率。优先改成具体动作/细节/对白表达，不改剧情事实、时间线和数字信息。",
+        }),
+      });
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        throw new Error(data?.message || `降重复词失败: ${res.status}`);
+      }
+      await reload(chapterId);
+    } catch (error) {
+      setActionError(error instanceof Error ? error.message : "降重复词失败");
+    } finally {
+      setActionLoading(false);
+    }
+  }
+
+  async function createSecondChapterTemplate() {
+    if (!projectId) return;
+    setActionError("");
+    setActionLoading(true);
+    try {
+      const res = await fetch(`${API_BASE}/projects/${projectId}/chapters/second-template`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(data?.message || `创建第二章模板失败: ${res.status}`);
+      }
+      router.push(data.workspace_path ?? `/projects/${projectId}/chapters/2/workspace`);
+    } catch (error) {
+      setActionError(error instanceof Error ? error.message : "创建第二章模板失败");
+    } finally {
+      setActionLoading(false);
+    }
   }
 
   async function updateItemStatus(kind: "facts" | "seeds" | "timeline", id: string, status: string) {
@@ -172,17 +398,28 @@ export default function ChapterWorkspacePage({ params }: Props) {
               </section>
               <section>
                 <h3 className="font-semibold">追溯信息 / 检索元数据</h3>
-                <pre className="max-h-40 overflow-auto rounded bg-black/5 p-2 text-xs">
-                  {JSON.stringify(
-                    {
-                      context_hash: workspace.generation_context_snapshot?.context_hash,
-                      retriever_meta: workspace.generation_context_snapshot?.retriever_meta,
-                      trace_map: workspace.generation_context_snapshot?.trace_map,
-                    },
-                    null,
-                    2,
-                  )}
-                </pre>
+                {!showTraceMeta ? (
+                  <Button variant="ghost" onClick={() => setShowTraceMeta(true)}>
+                    展开详细追溯 JSON
+                  </Button>
+                ) : (
+                  <div>
+                    <pre className="max-h-40 overflow-auto rounded bg-black/5 p-2 text-xs">
+                      {JSON.stringify(
+                        {
+                          context_hash: workspace.generation_context_snapshot?.context_hash,
+                          retriever_meta: workspace.generation_context_snapshot?.retriever_meta,
+                          trace_map: workspace.generation_context_snapshot?.trace_map,
+                        },
+                        null,
+                        2,
+                      )}
+                    </pre>
+                    <Button className="mt-1" variant="ghost" onClick={() => setShowTraceMeta(false)}>
+                      收起详细追溯 JSON
+                    </Button>
+                  </div>
+                )}
               </section>
             </div>
           )}
@@ -193,10 +430,30 @@ export default function ChapterWorkspacePage({ params }: Props) {
             <Button variant={tab === "beats" ? "default" : "ghost"} onClick={() => setTab("beats")}>场景骨架</Button>
             <Button variant={tab === "draft" ? "default" : "ghost"} onClick={() => setTab("draft")}>正文初稿</Button>
             <Button variant={tab === "polish" ? "default" : "ghost"} onClick={() => setTab("polish")}>润色定稿</Button>
-            <Button variant="secondary" onClick={() => runGenerate(tab)}>
+            <Button variant="secondary" disabled={actionLoading} onClick={() => runGenerate(tab)}>
               生成 {tab}
             </Button>
+            {tab === "polish" && (
+              <Button variant="ghost" disabled={actionLoading || !selectedVersionId} onClick={runNumericConsistencyFix}>
+                数字一致性修复
+              </Button>
+            )}
+            <Button variant="ghost" disabled={actionLoading || !selectedVersionId} onClick={runDeduplicateCleanup}>
+              清理重复段
+            </Button>
+            <Button variant="ghost" disabled={actionLoading || !selectedVersionId} onClick={runReduceWordRepetition}>
+              降重复词
+            </Button>
+            {chapterNo === 1 && (
+              <Button variant="ghost" disabled={actionLoading} onClick={createSecondChapterTemplate}>
+                创建第2章衔接模板
+              </Button>
+            )}
           </div>
+
+          {actionError && (
+            <div className="mb-3 rounded border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">{actionError}</div>
+          )}
 
           <div className="mb-3 flex flex-wrap items-center gap-2 text-sm">
             <select
@@ -227,6 +484,9 @@ export default function ChapterWorkspacePage({ params }: Props) {
             <Button variant="ghost" onClick={runDiff}>
               查看差异
             </Button>
+            <Button variant="ghost" disabled={actionLoading || !selectedVersionId} onClick={runRollback}>
+              回滚到当前选择版本
+            </Button>
           </div>
 
           <MonacoEditor
@@ -256,10 +516,25 @@ export default function ChapterWorkspacePage({ params }: Props) {
                   跳转段落
                 </Button>
                 <div className="mt-2 grid gap-1">
+                  {fixStrategies.map((strategy: string, idx: number) => {
+                    const mode = FIX_MODE_BY_STRATEGY_INDEX[idx] ?? "replace_span";
+                    const label = FIX_MODE_LABELS[mode];
+                    return (
+                      <Button
+                        key={`${issue.issue_id}-${idx}`}
+                        variant="secondary"
+                        disabled={actionLoading}
+                        onClick={() => runFix(issue, idx)}
+                        title={strategy}
+                      >
+                        {`策略${idx + 1}：${label}`}
+                      </Button>
+                    );
+                  })}
                   {fixStrategies.map((strategy: string, idx: number) => (
-                    <Button key={strategy} variant="secondary" onClick={() => runFix(`strategy-${idx + 1}`, issue)}>
-                      修复策略 {idx + 1}
-                    </Button>
+                    <p key={`${issue.issue_id}-hint-${idx}`} className="text-[11px] text-black/55">
+                      {`策略${idx + 1}说明：${strategy}`}
+                    </p>
                   ))}
                 </div>
               </div>

@@ -11,6 +11,11 @@ export class ChaptersController {
     return this.chaptersService.createChapter(projectId, dto);
   }
 
+  @Post("projects/:projectId/chapters/second-template")
+  createSecondTemplate(@Param("projectId") projectId: string) {
+    return this.chaptersService.createSecondChapterTemplate(projectId);
+  }
+
   @Get("projects/:projectId/chapters")
   listProjectChapters(@Param("projectId") projectId: string) {
     return this.chaptersService.listProjectChapters(projectId);
@@ -22,8 +27,8 @@ export class ChaptersController {
   }
 
   @Get("chapters/:chapterId/versions")
-  getVersions(@Param("chapterId") chapterId: string) {
-    return this.chaptersService.getVersions(chapterId);
+  getVersions(@Param("chapterId") chapterId: string, @Query("meta") meta?: string) {
+    return this.chaptersService.getVersions(chapterId, { metaOnly: meta === "1" || meta === "true" });
   }
 
   @Get("chapters/:chapterId/versions/diff")
@@ -33,6 +38,11 @@ export class ChaptersController {
     @Query("to") toVersionId: string,
   ) {
     return this.chaptersService.getVersionDiff(chapterId, fromVersionId, toVersionId);
+  }
+
+  @Get("chapters/:chapterId/versions/:versionId")
+  getVersion(@Param("chapterId") chapterId: string, @Param("versionId") versionId: string) {
+    return this.chaptersService.getVersion(chapterId, versionId);
   }
 
   @Post("chapters/:chapterId/rollback")

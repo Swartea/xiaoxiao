@@ -39,12 +39,29 @@ const extractorSchema = z.object({
     }),
   ),
   character_state_snapshot: z.record(z.unknown()),
+  character_status_updates: z
+    .array(
+      z.object({
+        character_id: z.string().optional(),
+        character_name: z.string().optional(),
+        from_status: z.string().optional().nullable(),
+        to_status: z.string(),
+        source_span: z
+          .object({
+            from: z.number().int().nonnegative(),
+            to: z.number().int().nonnegative(),
+          })
+          .optional(),
+      }),
+    )
+    .optional(),
 });
 
 export function parseExtractorJson(rawText: string): ExtractedMemory {
   const parsed = extractorSchema.parse(JSON.parse(rawText));
   return {
     ...parsed,
+    character_status_updates: parsed.character_status_updates ?? [],
     needs_manual_review: false,
   };
 }
@@ -87,6 +104,7 @@ export function fallbackExtractMemory(text: string): ExtractedMemory {
     seeds_added: [],
     timeline_events_added: [],
     character_state_snapshot: {},
+    character_status_updates: [],
     needs_manual_review: true,
     review_notes: "Extractor JSON parse failed; fallback extraction used.",
   };

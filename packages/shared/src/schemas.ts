@@ -24,6 +24,9 @@ export const generationContextSchema = z.object({
     z.object({
       id: z.string(),
       name: z.string(),
+      visual_anchors: z.string().optional().nullable(),
+      personality_tags: z.string().optional().nullable(),
+      current_status: z.string().optional().nullable(),
       state_snapshot: z.unknown(),
       key_traits: z.array(z.string()),
     }),

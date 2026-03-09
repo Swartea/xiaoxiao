@@ -1,10 +1,11 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { ProjectNav } from "@/components/project-nav";
 import { API_BASE } from "@/lib/api";
+import { CharacterEditorCard } from "@/components/character-editor-card";
 
 type Props = { params: Promise<{ id: string }> };
 
@@ -41,6 +42,10 @@ function splitList(input: string): string[] {
     .filter(Boolean);
 }
 
+function hashBible(data: BibleData): string {
+  return JSON.stringify(data);
+}
+
 export default function BiblePage({ params }: Props) {
   const [projectId, setProjectId] = useState("");
   const [markdown, setMarkdown] = useState("");
@@ -48,8 +53,13 @@ export default function BiblePage({ params }: Props) {
   const [jsonText, setJsonText] = useState("{}");
   const [mode, setMode] = useState<"form" | "json">("form");
   const [quickNames, setQuickNames] = useState("");
+  const [characterWeights, setCharacterWeights] = useState<Record<number, "lead" | "side">>({});
   const [errorText, setErrorText] = useState("");
+  const [saveState, setSaveState] = useState<"idle" | "saving" | "saved" | "error">("idle");
+  const [lastSavedAt, setLastSavedAt] = useState("");
+  const [hydrated, setHydrated] = useState(false);
   const [saving, setSaving] = useState(false);
+  const lastSavedHashRef = useRef("");
 
   useEffect(() => {
     void (async () => {
@@ -61,19 +71,73 @@ export default function BiblePage({ params }: Props) {
       setBible(normalized);
       setMarkdown(data.markdown ?? "");
       setJsonText(JSON.stringify(normalized, null, 2));
+      lastSavedHashRef.current = hashBible(normalized);
+      setSaveState("saved");
+      setLastSavedAt(new Date().toLocaleTimeString("zh-CN", { hour12: false }));
+      setHydrated(true);
     })();
   }, [params]);
 
   const hasRelationships = useMemo(() => bible.relationships.length > 0, [bible.relationships.length]);
+  const glossaryConflictKeys = useMemo(() => {
+    const canonicalSetByTerm = new Map<string, Set<string>>();
+    for (const item of bible.glossary) {
+      const term = String(item?.term ?? "").trim().toLowerCase();
+      const canonical = String(item?.canonical_form ?? "").trim().toLowerCase();
+      if (!term || !canonical) continue;
+      if (!canonicalSetByTerm.has(term)) {
+        canonicalSetByTerm.set(term, new Set());
+      }
+      canonicalSetByTerm.get(term)!.add(canonical);
+    }
+
+    const conflicts = new Set<string>();
+    for (const [term, canonicalSet] of canonicalSetByTerm.entries()) {
+      if (canonicalSet.size > 1) {
+        conflicts.add(term);
+      }
+    }
+    return conflicts;
+  }, [bible.glossary]);
+
+  useEffect(() => {
+    if (!hydrated || !projectId || mode !== "form") return;
+    const nextHash = hashBible(bible);
+    if (nextHash === lastSavedHashRef.current) return;
+
+    const timer = setTimeout(() => {
+      void saveWithPayload(bible, { silent: true });
+    }, 900);
+
+    return () => clearTimeout(timer);
+  }, [bible, hydrated, mode, projectId]);
 
   function syncBible(next: BibleData) {
     setBible(next);
     setJsonText(JSON.stringify(next, null, 2));
+    if (hashBible(next) !== lastSavedHashRef.current) {
+      setSaveState("idle");
+    }
   }
 
-  async function saveWithPayload(payload: BibleData) {
+  function getCharacterWeight(index: number): "lead" | "side" {
+    return characterWeights[index] ?? (index === 0 ? "lead" : "side");
+  }
+
+  function setCharacterWeight(index: number, weight: "lead" | "side") {
+    setCharacterWeights((prev) => ({
+      ...prev,
+      [index]: weight,
+    }));
+  }
+
+  async function saveWithPayload(payload: BibleData, options?: { silent?: boolean }) {
+    if (saving) return;
     setSaving(true);
-    setErrorText("");
+    setSaveState("saving");
+    if (!options?.silent) {
+      setErrorText("");
+    }
     try {
       const res = await fetch(`${API_BASE}/projects/${projectId}/bible`, {
         method: "PATCH",
@@ -89,8 +153,12 @@ export default function BiblePage({ params }: Props) {
       const normalized = normalizeBible(data.structured);
       setMarkdown(data.markdown ?? "");
       syncBible(normalized);
+      lastSavedHashRef.current = hashBible(normalized);
+      setSaveState("saved");
+      setLastSavedAt(new Date().toLocaleTimeString("zh-CN", { hour12: false }));
     } catch (error) {
       setErrorText(error instanceof Error ? error.message : "保存失败，请稍后重试");
+      setSaveState("error");
     } finally {
       setSaving(false);
     }
@@ -122,6 +190,9 @@ export default function BiblePage({ params }: Props) {
       age: null,
       appearance: "",
       personality: "",
+      visual_anchors: "",
+      personality_tags: "",
+      current_status: "",
       motivation: "",
       secrets: "",
       abilities: {},
@@ -152,6 +223,9 @@ export default function BiblePage({ params }: Props) {
           age: null,
           appearance: "",
           personality: "",
+          visual_anchors: "",
+          personality_tags: "",
+          current_status: "",
           motivation: "",
           secrets: "",
           abilities: {},
@@ -162,6 +236,16 @@ export default function BiblePage({ params }: Props) {
   }
 
   function removeCharacter(index: number) {
+    setCharacterWeights((prev) => {
+      const next: Record<number, "lead" | "side"> = {};
+      for (const [rawKey, value] of Object.entries(prev)) {
+        const key = Number(rawKey);
+        if (key < index) next[key] = value;
+        if (key > index) next[key - 1] = value;
+      }
+      return next;
+    });
+
     syncBible({
       ...bible,
       characters: bible.characters.filter((_, i) => i !== index),
@@ -249,9 +333,18 @@ export default function BiblePage({ params }: Props) {
         <Button variant={mode === "form" ? "default" : "ghost"} onClick={() => setMode("form")}>可视化编辑</Button>
         <Button variant={mode === "json" ? "default" : "ghost"} onClick={() => setMode("json")}>JSON 高级模式</Button>
         <Button onClick={saveStructured} disabled={saving}>
-          {saving ? "保存中..." : "保存设定"}
+          {saving ? "保存中..." : "立即保存"}
         </Button>
       </div>
+
+      {mode === "form" && (
+        <div className="mt-3 rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-600">
+          {saveState === "saving" && "自动保存中..."}
+          {saveState === "saved" && `已保存${lastSavedAt ? `（${lastSavedAt}）` : ""}`}
+          {saveState === "idle" && "有未保存修改，系统将在 1 秒内自动保存"}
+          {saveState === "error" && "自动保存失败，请检查网络后点击“立即保存”重试"}
+        </div>
+      )}
 
       {errorText && <p className="mt-3 rounded-md bg-red-50 px-3 py-2 text-sm text-red-700">{errorText}</p>}
 
@@ -269,54 +362,25 @@ export default function BiblePage({ params }: Props) {
                     value={quickNames}
                     onChange={(e) => setQuickNames(e.target.value)}
                   />
-                  <Button variant="secondary" onClick={addCharactersFromQuickInput}>批量添加</Button>
+                  {bible.characters.length === 0 ? (
+                    <Button variant="secondary" onClick={addCharactersFromQuickInput}>批量添加</Button>
+                  ) : (
+                    <Button variant="ghost" onClick={addCharactersFromQuickInput}>＋</Button>
+                  )}
                 </div>
 
                 <div className="mt-3 space-y-3">
                   {bible.characters.map((char, idx) => (
-                    <div key={`char-${idx}`} className="rounded border border-black/10 p-2">
-                      <div className="grid gap-2 md:grid-cols-2">
-                        <input
-                          className="rounded border border-black/20 px-2 py-1 text-sm"
-                          placeholder="人物名"
-                          value={char.name ?? ""}
-                          onChange={(e) => updateCharacter(idx, { name: e.target.value })}
-                        />
-                        <input
-                          className="rounded border border-black/20 px-2 py-1 text-sm"
-                          placeholder="年龄"
-                          value={char.age ?? ""}
-                          onChange={(e) => updateCharacter(idx, { age: e.target.value ? Number(e.target.value) : null })}
-                        />
-                        <input
-                          className="rounded border border-black/20 px-2 py-1 text-sm"
-                          placeholder="性格"
-                          value={char.personality ?? ""}
-                          onChange={(e) => updateCharacter(idx, { personality: e.target.value })}
-                        />
-                        <input
-                          className="rounded border border-black/20 px-2 py-1 text-sm"
-                          placeholder="动机"
-                          value={char.motivation ?? ""}
-                          onChange={(e) => updateCharacter(idx, { motivation: e.target.value })}
-                        />
-                        <input
-                          className="rounded border border-black/20 px-2 py-1 text-sm md:col-span-2"
-                          placeholder="别名（逗号分隔）"
-                          value={Array.isArray(char.aliases) ? char.aliases.join("，") : ""}
-                          onChange={(e) => updateCharacter(idx, { aliases: splitList(e.target.value) })}
-                        />
-                        <input
-                          className="rounded border border-black/20 px-2 py-1 text-sm md:col-span-2"
-                          placeholder="口头禅（逗号分隔）"
-                          value={Array.isArray(char.catchphrases) ? char.catchphrases.join("，") : ""}
-                          onChange={(e) => updateCharacter(idx, { catchphrases: splitList(e.target.value) })}
-                        />
-                      </div>
-                      <div className="mt-2 text-right">
-                        <Button variant="ghost" onClick={() => removeCharacter(idx)}>删除人物</Button>
-                      </div>
-                    </div>
+                    <CharacterEditorCard
+                      key={`char-${idx}`}
+                      index={idx}
+                      character={char}
+                      weight={getCharacterWeight(idx)}
+                      onWeightChange={(weight) => setCharacterWeight(idx, weight)}
+                      onPatch={(patch) => updateCharacter(idx, patch)}
+                      onDelete={() => removeCharacter(idx)}
+                      splitList={splitList}
+                    />
                   ))}
                 </div>
 
@@ -326,116 +390,177 @@ export default function BiblePage({ params }: Props) {
               </section>
 
               <section>
-                <h2 className="font-medium">设定库（地点/组织/道具/能力/规则）</h2>
+                <div className="flex items-center justify-between">
+                  <h2 className="font-medium">设定库（地点/组织/道具/能力/规则）</h2>
+                  <Button
+                    variant="ghost"
+                    className="h-8 border border-dashed border-slate-300 text-slate-600 hover:border-slate-500"
+                    onClick={addEntity}
+                  >
+                    +
+                  </Button>
+                </div>
                 <div className="mt-3 space-y-3">
                   {bible.entities.map((entity, idx) => (
-                    <div key={`entity-${idx}`} className="rounded border border-black/10 p-2">
-                      <div className="grid gap-2 md:grid-cols-2">
+                    <div key={`entity-${idx}`} className="group relative rounded-xl border border-slate-200 bg-white p-3 shadow-sm">
+                      <button
+                        type="button"
+                        className="absolute right-2 top-2 hidden h-6 w-6 rounded-full text-slate-400 transition hover:bg-red-50 hover:text-red-500 group-hover:block"
+                        onClick={() => removeEntity(idx)}
+                      >
+                        ×
+                      </button>
+                      <div className="grid gap-2 md:grid-cols-[1fr_180px]">
                         <input
-                          className="rounded border border-black/20 px-2 py-1 text-sm"
-                          placeholder="类型：location/org/item/ability/rule"
-                          value={entity.type ?? ""}
-                          onChange={(e) => updateEntity(idx, { type: e.target.value })}
-                        />
-                        <input
-                          className="rounded border border-black/20 px-2 py-1 text-sm"
-                          placeholder="名称"
+                          className="rounded-md border border-slate-200 px-2 py-1.5 text-sm font-semibold text-slate-900 placeholder:text-slate-400 focus:border-sky-400 focus:outline-none"
+                          placeholder="设定名称（核心）"
                           value={entity.name ?? ""}
                           onChange={(e) => updateEntity(idx, { name: e.target.value })}
                         />
                         <input
-                          className="rounded border border-black/20 px-2 py-1 text-sm md:col-span-2"
+                          className="rounded-md border border-slate-200 px-2 py-1.5 text-xs text-slate-600 placeholder:text-slate-400 focus:border-sky-400 focus:outline-none"
+                          placeholder="类型：rule/item/org..."
+                          value={entity.type ?? ""}
+                          onChange={(e) => updateEntity(idx, { type: e.target.value })}
+                        />
+                        <input
+                          className="rounded-md border border-slate-200 bg-slate-50 px-2 py-1.5 text-sm text-slate-700 placeholder:text-slate-400 focus:border-sky-400 focus:outline-none md:col-span-2"
                           placeholder="描述"
                           value={entity.description ?? ""}
                           onChange={(e) => updateEntity(idx, { description: e.target.value })}
                         />
                         <input
-                          className="rounded border border-black/20 px-2 py-1 text-sm"
-                          placeholder="约束"
+                          className="rounded-md border border-red-100 bg-red-50/70 px-2 py-1.5 text-sm text-slate-700 placeholder:text-red-300 focus:border-red-300 focus:outline-none"
+                          placeholder="约束（冲突点）"
                           value={entity.constraints ?? ""}
                           onChange={(e) => updateEntity(idx, { constraints: e.target.value })}
                         />
                         <input
-                          className="rounded border border-black/20 px-2 py-1 text-sm"
-                          placeholder="代价"
+                          className="rounded-md border border-sky-100 bg-sky-50/70 px-2 py-1.5 text-sm text-slate-700 placeholder:text-sky-300 focus:border-sky-300 focus:outline-none"
+                          placeholder="代价（冲突点）"
                           value={entity.cost ?? ""}
                           onChange={(e) => updateEntity(idx, { cost: e.target.value })}
                         />
                       </div>
-                      <div className="mt-2 text-right">
-                        <Button variant="ghost" onClick={() => removeEntity(idx)}>删除设定</Button>
-                      </div>
                     </div>
                   ))}
-                </div>
-                <div className="mt-2">
-                  <Button variant="secondary" onClick={addEntity}>新增设定</Button>
                 </div>
               </section>
 
               <section>
-                <h2 className="font-medium">术语表</h2>
+                <div className="flex items-center justify-between">
+                  <h2 className="font-medium">术语表</h2>
+                  <Button
+                    variant="ghost"
+                    className="h-8 border border-dashed border-slate-300 text-slate-600 hover:border-slate-500"
+                    onClick={addGlossary}
+                  >
+                    +
+                  </Button>
+                </div>
                 <div className="mt-3 space-y-3">
-                  {bible.glossary.map((term, idx) => (
-                    <div key={`term-${idx}`} className="rounded border border-black/10 p-2">
-                      <div className="grid gap-2 md:grid-cols-3">
+                  {bible.glossary.map((term, idx) => {
+                    const conflict = glossaryConflictKeys.has(String(term?.term ?? "").trim().toLowerCase());
+                    return (
+                      <div
+                        key={`term-${idx}`}
+                        className={`group relative rounded-lg border p-3 ${
+                          conflict ? "border-red-200 bg-red-50/50" : "border-slate-200 bg-white"
+                        }`}
+                      >
+                        <button
+                          type="button"
+                          className="absolute right-2 top-2 hidden h-6 w-6 rounded-full text-slate-400 transition hover:bg-red-50 hover:text-red-500 group-hover:block"
+                          onClick={() => removeGlossary(idx)}
+                        >
+                          ×
+                        </button>
+                        <div className="grid gap-2 md:grid-cols-2">
+                          <input
+                            className="rounded-md border border-slate-200 px-2 py-1.5 text-sm font-semibold text-slate-900 placeholder:text-slate-400 focus:border-sky-400 focus:outline-none"
+                            placeholder="术语（核心）"
+                            value={term.term ?? ""}
+                            onChange={(e) => updateGlossary(idx, { term: e.target.value })}
+                          />
+                          <input
+                            className="rounded-md border border-slate-200 px-2 py-1.5 text-right text-sm text-slate-700 placeholder:text-slate-400 focus:border-sky-400 focus:outline-none"
+                            placeholder="规范写法"
+                            value={term.canonical_form ?? ""}
+                            onChange={(e) => updateGlossary(idx, { canonical_form: e.target.value })}
+                          />
+                        </div>
                         <input
-                          className="rounded border border-black/20 px-2 py-1 text-sm"
-                          placeholder="术语"
-                          value={term.term ?? ""}
-                          onChange={(e) => updateGlossary(idx, { term: e.target.value })}
-                        />
-                        <input
-                          className="rounded border border-black/20 px-2 py-1 text-sm"
-                          placeholder="规范写法"
-                          value={term.canonical_form ?? ""}
-                          onChange={(e) => updateGlossary(idx, { canonical_form: e.target.value })}
-                        />
-                        <input
-                          className="rounded border border-black/20 px-2 py-1 text-sm"
+                          className="mt-2 w-full rounded-md border border-slate-200 bg-slate-50 px-2 py-1.5 text-sm text-slate-600 placeholder:text-slate-400 focus:border-sky-400 focus:outline-none"
                           placeholder="备注"
                           value={term.notes ?? ""}
                           onChange={(e) => updateGlossary(idx, { notes: e.target.value })}
                         />
+                        {conflict && <p className="mt-2 text-xs text-red-600">冲突：同一术语存在多个规范写法，请统一。</p>}
                       </div>
-                      <div className="mt-2 text-right">
-                        <Button variant="ghost" onClick={() => removeGlossary(idx)}>删除术语</Button>
-                      </div>
-                    </div>
-                  ))}
-                </div>
-                <div className="mt-2">
-                  <Button variant="secondary" onClick={addGlossary}>新增术语</Button>
+                    );
+                  })}
                 </div>
               </section>
 
               <section>
-                <h2 className="font-medium">时间线</h2>
-                <div className="mt-3 space-y-3">
-                  {bible.timeline.map((item, idx) => (
-                    <div key={`timeline-${idx}`} className="rounded border border-black/10 p-2">
-                      <div className="grid gap-2 md:grid-cols-3">
-                        <input
-                          className="rounded border border-black/20 px-2 py-1 text-sm"
-                          placeholder="时间标记"
-                          value={item.time_mark ?? ""}
-                          onChange={(e) => updateTimeline(idx, { time_mark: e.target.value })}
-                        />
-                        <input
-                          className="rounded border border-black/20 px-2 py-1 text-sm md:col-span-2"
-                          placeholder="事件"
-                          value={item.event ?? ""}
-                          onChange={(e) => updateTimeline(idx, { event: e.target.value })}
-                        />
-                      </div>
-                      <div className="mt-2 text-right">
-                        <Button variant="ghost" onClick={() => removeTimeline(idx)}>删除事件</Button>
-                      </div>
-                    </div>
-                  ))}
+                <div className="flex items-center justify-between">
+                  <h2 className="font-medium">时间线</h2>
+                  <Button
+                    variant="ghost"
+                    className="h-8 border border-dashed border-slate-300 text-slate-600 hover:border-slate-500"
+                    onClick={addTimeline}
+                  >
+                    +
+                  </Button>
                 </div>
-                <div className="mt-2">
-                  <Button variant="secondary" onClick={addTimeline}>新增时间线事件</Button>
+                <div className="relative mt-3 pl-5">
+                  <div className="pointer-events-none absolute bottom-2 left-[8px] top-2 w-px bg-slate-200" />
+                  <div className="space-y-3">
+                    {bible.timeline.map((item, idx) => (
+                      <div key={`timeline-${idx}`} className="group relative">
+                        <span className="absolute -left-[13px] top-6 h-2.5 w-2.5 rounded-full bg-slate-400 ring-2 ring-white" />
+                        <div className="rounded-lg border border-slate-200 bg-white p-3">
+                          <button
+                            type="button"
+                            className="absolute right-2 top-2 hidden h-6 w-6 rounded-full text-slate-400 transition hover:bg-red-50 hover:text-red-500 group-hover:block"
+                            onClick={() => removeTimeline(idx)}
+                          >
+                            ×
+                          </button>
+                          <div className="grid gap-2 md:grid-cols-[180px_1fr_120px]">
+                            <input
+                              className="rounded-md border border-slate-200 bg-slate-50 px-2 py-1.5 text-sm text-slate-700 placeholder:text-slate-400 focus:border-sky-400 focus:outline-none"
+                              placeholder="时间标记"
+                              value={item.time_mark ?? ""}
+                              onChange={(e) => updateTimeline(idx, { time_mark: e.target.value })}
+                            />
+                            <input
+                              className="rounded-md border border-slate-200 px-2 py-1.5 text-sm text-slate-800 placeholder:text-slate-400 focus:border-sky-400 focus:outline-none"
+                              placeholder="事件"
+                              value={item.event ?? ""}
+                              onChange={(e) => updateTimeline(idx, { event: e.target.value })}
+                            />
+                            <input
+                              className="rounded-md border border-slate-200 px-2 py-1.5 text-sm text-slate-700 placeholder:text-slate-400 focus:border-sky-400 focus:outline-none"
+                              placeholder="章节号"
+                              value={item.chapter_no_ref ?? 1}
+                              onChange={(e) =>
+                                updateTimeline(idx, { chapter_no_ref: e.target.value ? Number(e.target.value) : 1 })
+                              }
+                            />
+                          </div>
+                          <div className="mt-2 text-right">
+                            <a
+                              className="text-xs text-sky-600 hover:underline"
+                              href={`/projects/${projectId}/chapters/${item.chapter_no_ref ?? 1}/workspace`}
+                            >
+                              跳到第 {item.chapter_no_ref ?? 1} 章工作台
+                            </a>
+                          </div>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
                 </div>
               </section>
 

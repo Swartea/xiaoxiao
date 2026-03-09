@@ -9,21 +9,39 @@ import { API_BASE } from "@/lib/api";
 
 type Props = { params: Promise<{ id: string }> };
 
+function asArray(value: unknown): any[] {
+  return Array.isArray(value) ? value : [];
+}
+
 export default function CharactersPage({ params }: Props) {
   const [projectId, setProjectId] = useState("");
   const [characters, setCharacters] = useState<any[]>([]);
   const [relationships, setRelationships] = useState<any[]>([]);
+  const [loadError, setLoadError] = useState("");
 
   useEffect(() => {
     void (async () => {
       const { id } = await params;
       setProjectId(id);
-      const [charRes, relRes] = await Promise.all([
-        fetch(`${API_BASE}/projects/${id}/characters`),
-        fetch(`${API_BASE}/projects/${id}/relationships`),
-      ]);
-      setCharacters(await charRes.json());
-      setRelationships(await relRes.json());
+      setLoadError("");
+      try {
+        const [charRes, relRes] = await Promise.all([
+          fetch(`${API_BASE}/projects/${id}/characters`),
+          fetch(`${API_BASE}/projects/${id}/relationships`),
+        ]);
+
+        const [charData, relData] = await Promise.all([charRes.json(), relRes.json()]);
+        setCharacters(asArray(charData));
+        setRelationships(asArray(relData));
+
+        if (!charRes.ok || !relRes.ok) {
+          setLoadError("人物或关系数据加载失败，已使用空列表兜底显示。");
+        }
+      } catch {
+        setCharacters([]);
+        setRelationships([]);
+        setLoadError("网络异常，人物关系图加载失败。");
+      }
     })();
   }, [params]);
 
@@ -56,6 +74,7 @@ export default function CharactersPage({ params }: Props) {
     <main className="mx-auto max-w-7xl p-8">
       <ProjectNav id={projectId} />
       <h1 className="font-heading text-3xl">人物关系图谱</h1>
+      {loadError && <p className="mt-3 rounded-md bg-red-50 px-3 py-2 text-sm text-red-700">{loadError}</p>}
       <Card className="mt-4 h-[680px] p-0">
         <ReactFlow fitView nodes={nodes} edges={edges}>
           <Background />

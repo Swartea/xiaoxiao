@@ -67,6 +67,9 @@ export function buildGenerationContext(input: AssemblerInput): AssemblerOutput {
     involved_characters: characterSnapshots.map((item) => ({
       id: item.data.id,
       name: item.data.name,
+      visual_anchors: item.data.visual_anchors ?? undefined,
+      personality_tags: item.data.personality_tags ?? undefined,
+      current_status: item.data.current_status ?? undefined,
       state_snapshot: item.data.state_snapshot,
       key_traits: item.data.key_traits,
     })),

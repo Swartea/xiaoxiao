@@ -83,9 +83,11 @@ model Project {
   bibleEntities BibleEntity[]
   glossaryTerms GlossaryTerm[]
   chapters      Chapter[]
+  outlineNodes  StoryOutlineNode[]
   facts         Fact[]
   seeds         Seed[]
   timeline      TimelineEvent[]
+  bootstrapRequests BootstrapRequest[]
 
   @@map("projects")
 }
@@ -106,19 +108,22 @@ model StylePreset {
 }
 
 model Character {
-  id          String   @id @default(uuid()) @db.Uuid
-  project_id  String   @db.Uuid
-  name        String
-  aliases     String[]
-  age         Int?
-  appearance  String?
-  personality String?
-  motivation  String?
-  secrets     String?
-  abilities   Json?
+  id               String   @id @default(uuid()) @db.Uuid
+  project_id       String   @db.Uuid
+  name             String
+  aliases          String[]
+  age              Int?
+  appearance       String?
+  personality      String?
+  visual_anchors   String?
+  personality_tags String?
+  current_status   String?
+  motivation       String?
+  secrets          String?
+  abilities        Json?
   catchphrases String[]
-  created_at  DateTime @default(now())
-  updated_at  DateTime @updatedAt
+  created_at       DateTime @default(now())
+  updated_at       DateTime @updatedAt
 
   project Project @relation(fields: [project_id], references: [id], onDelete: Cascade)
 
@@ -361,4 +366,42 @@ model GenerationRequest {
   @@unique([chapter_id, stage, idempotency_key])
   @@index([chapter_id, stage])
   @@map("generation_requests")
+}
+
+model StoryOutlineNode {
+  id                   String   @id @default(uuid()) @db.Uuid
+  project_id           String   @db.Uuid
+  phase_no             Int
+  title                String
+  summary              String
+  goal                 String?
+  conflict             String?
+  milestone_chapter_no Int?
+  created_at           DateTime @default(now())
+  updated_at           DateTime @updatedAt
+
+  project Project @relation(fields: [project_id], references: [id], onDelete: Cascade)
+
+  @@unique([project_id, phase_no])
+  @@index([project_id])
+  @@map("story_outline_nodes")
+}
+
+model BootstrapRequest {
+  id                String                  @id @default(uuid()) @db.Uuid
+  project_id        String                  @db.Uuid
+  idempotency_key   String
+  request_hash      String
+  status            GenerationRequestStatus
+  response_chapter_id String?               @db.Uuid
+  response_chapter_no Int?
+  error_message     String?
+  created_at        DateTime                @default(now())
+  updated_at        DateTime                @updatedAt
+
+  project Project @relation(fields: [project_id], references: [id], onDelete: Cascade)
+
+  @@unique([project_id, idempotency_key])
+  @@index([project_id])
+  @@map("project_bootstrap_requests")
 }

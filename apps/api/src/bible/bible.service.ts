@@ -35,7 +35,14 @@ export class BibleService {
   }
 
   private renderBibleMarkdown(payload: {
-    characters: Array<{ name: string; personality: string | null; motivation: string | null }>;
+    characters: Array<{
+      name: string;
+      personality: string | null;
+      motivation: string | null;
+      visual_anchors: string | null;
+      personality_tags: string | null;
+      current_status: string | null;
+    }>;
     entities: Array<{ type: string; name: string; description: string | null; constraints: string | null }>;
     glossary: Array<{ term: string; canonical_form: string; notes: string | null }>;
     timeline: Array<{ time_mark: string; event: string; chapter_no_ref: number }>;
@@ -48,6 +55,9 @@ export class BibleService {
     for (const c of payload.characters) {
       lines.push(`- **${c.name}**`);
       if (c.personality) lines.push(`  - Personality: ${c.personality}`);
+      if (c.visual_anchors) lines.push(`  - Visual Anchors: ${c.visual_anchors}`);
+      if (c.personality_tags) lines.push(`  - Personality Tags: ${c.personality_tags}`);
+      if (c.current_status) lines.push(`  - Current Status: ${c.current_status}`);
       if (c.motivation) lines.push(`  - Motivation: ${c.motivation}`);
     }
 
@@ -147,6 +157,9 @@ export class BibleService {
               age: item.age,
               appearance: item.appearance,
               personality: item.personality,
+              visual_anchors: item.visual_anchors,
+              personality_tags: item.personality_tags,
+              current_status: item.current_status,
               motivation: item.motivation,
               secrets: item.secrets,
               abilities: toJson(item.abilities),
@@ -254,6 +267,9 @@ export class BibleService {
         age: dto.age,
         appearance: dto.appearance,
         personality: dto.personality,
+        visual_anchors: dto.visual_anchors,
+        personality_tags: dto.personality_tags,
+        current_status: dto.current_status,
         motivation: dto.motivation,
         secrets: dto.secrets,
         abilities: toJson(dto.abilities),

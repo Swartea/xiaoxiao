@@ -34,6 +34,18 @@ export class CreateCharacterDto {
 
   @IsOptional()
   @IsString()
+  visual_anchors?: string;
+
+  @IsOptional()
+  @IsString()
+  personality_tags?: string;
+
+  @IsOptional()
+  @IsString()
+  current_status?: string;
+
+  @IsOptional()
+  @IsString()
   motivation?: string;
 
   @IsOptional()
