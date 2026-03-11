@@ -8,6 +8,7 @@ export type GenerateTextArgs<TSchema extends z.ZodTypeAny | undefined = undefine
   temperature?: number;
   maxTokens?: number;
   model: string;
+  timeoutMs?: number;
 };
 
 export type GenerateTextResult<TSchema extends z.ZodTypeAny | undefined> = {
@@ -28,6 +29,25 @@ type OpenAiCompatibleProviderConfig = {
   baseURL?: string;
   name: "openai" | "deepseek" | "xai";
 };
+
+const DEFAULT_LLM_TIMEOUT_MS = 120_000;
+
+function resolveTimeoutMs(input?: number) {
+  if (Number.isFinite(input) && (input ?? 0) > 0) {
+    return Number(input);
+  }
+
+  const fromEnv = Number.parseInt(
+    (globalThis as { process?: { env?: Record<string, string | undefined> } }).process?.env?.LLM_REQUEST_TIMEOUT_MS ??
+      "",
+    10,
+  );
+  if (Number.isFinite(fromEnv) && fromEnv > 0) {
+    return fromEnv;
+  }
+
+  return DEFAULT_LLM_TIMEOUT_MS;
+}
 
 class OpenAiCompatibleChatProvider implements LlmProvider {
   readonly name: "openai" | "deepseek" | "xai";
@@ -58,24 +78,49 @@ class OpenAiCompatibleChatProvider implements LlmProvider {
   ): Promise<GenerateTextResult<TSchema>> {
     // deepseek-reasoner does not support temperature; omit it for compatibility.
     const shouldSetTemperature = !args.model.includes("reasoner");
-    const response = await this.client.chat.completions.create({
-      model: args.model,
-      messages: [
-        {
-          role: "system",
-          content: args.system,
-        },
-        {
-          role: "user",
-          content: args.user,
-        },
-      ],
-      temperature: shouldSetTemperature ? args.temperature : undefined,
-      max_tokens: args.maxTokens,
-    });
+    const timeoutMs = resolveTimeoutMs(args.timeoutMs);
+    const abortController = new AbortController();
+    const timer = setTimeout(() => abortController.abort(), timeoutMs);
 
-    const text = response.choices[0]?.message?.content ?? "";
-    return this.parseStructured(args.schema, text, args.model);
+    try {
+      const response = await this.client.chat.completions.create(
+        {
+          model: args.model,
+          messages: [
+            {
+              role: "system",
+              content: args.system,
+            },
+            {
+              role: "user",
+              content: args.user,
+            },
+          ],
+          temperature: shouldSetTemperature ? args.temperature : undefined,
+          max_tokens: args.maxTokens,
+        },
+        {
+          signal: abortController.signal,
+        },
+      );
+
+      const text = response.choices[0]?.message?.content ?? "";
+      return this.parseStructured(args.schema, text, args.model);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      const aborted =
+        (error instanceof Error && error.name === "AbortError") ||
+        message.toLowerCase().includes("aborted") ||
+        message.toLowerCase().includes("timed out") ||
+        message.toLowerCase().includes("timeout");
+
+      if (aborted) {
+        throw new Error(`LLM request timed out after ${Math.ceil(timeoutMs / 1000)}s`);
+      }
+      throw error;
+    } finally {
+      clearTimeout(timer);
+    }
   }
 }
 

@@ -44,6 +44,12 @@ importers:
       '@novel-factory/shared':
         specifier: workspace:*
         version: link:../../packages/shared
+      '@novel-factory/storyos-domain':
+        specifier: workspace:*
+        version: link:../../packages/storyos-domain
+      '@novel-factory/storyos-prompts':
+        specifier: workspace:*
+        version: link:../../packages/storyos-prompts
       '@prisma/client':
         specifier: ^6.4.1
         version: 6.19.2(prisma@6.19.2(typescript@5.9.3))(typescript@5.9.3)
@@ -189,6 +195,26 @@ importers:
       zod:
         specifier: ^3.24.2
         version: 3.25.76
+    devDependencies:
+      typescript:
+        specifier: ^5.8.2
+        version: 5.9.3
+
+  packages/storyos-domain:
+    dependencies:
+      zod:
+        specifier: ^3.24.2
+        version: 3.25.76
+    devDependencies:
+      typescript:
+        specifier: ^5.8.2
+        version: 5.9.3
+
+  packages/storyos-prompts:
+    dependencies:
+      '@novel-factory/storyos-domain':
+        specifier: workspace:*
+        version: link:../storyos-domain
     devDependencies:
       typescript:
         specifier: ^5.8.2

@@ -32,6 +32,21 @@ function compactSummaryFromText(text: string, maxLength = 220): string {
   return normalized.slice(0, maxLength) || "请根据上一章正文补充摘要。";
 }
 
+function pickMetaString(meta: unknown, key: string): string | null {
+  if (!meta || typeof meta !== "object" || Array.isArray(meta)) {
+    return null;
+  }
+  const value = (meta as Record<string, unknown>)[key];
+  return typeof value === "string" && value.trim().length > 0 ? value : null;
+}
+
+function excerptText(value: string | null, maxLength = 120): string | null {
+  if (!value) {
+    return null;
+  }
+  return value.length > maxLength ? `${value.slice(0, maxLength)}...` : value;
+}
+
 @Injectable()
 export class ChaptersService {
   constructor(@Inject(PrismaService) private readonly prisma: PrismaService) {}
@@ -244,9 +259,9 @@ export class ChaptersService {
     return chapter;
   }
 
-  getVersions(chapterId: string, options?: { metaOnly?: boolean }) {
+  async getVersions(chapterId: string, options?: { metaOnly?: boolean }) {
     if (options?.metaOnly) {
-      return this.prisma.chapterVersion.findMany({
+      const versions = await this.prisma.chapterVersion.findMany({
         where: { chapter_id: chapterId },
         orderBy: { version_no: "desc" },
         select: {
@@ -254,8 +269,21 @@ export class ChaptersService {
           version_no: true,
           stage: true,
           created_at: true,
+          parent_version_id: true,
+          meta: true,
         },
       });
+
+      return versions.map((version) => ({
+        id: version.id,
+        version_no: version.version_no,
+        stage: version.stage,
+        created_at: version.created_at,
+        parent_version_id: version.parent_version_id,
+        fix_mode: pickMetaString(version.meta, "mode"),
+        strategy_id: pickMetaString(version.meta, "strategy_id"),
+        instruction_excerpt: excerptText(pickMetaString(version.meta, "instruction")),
+      }));
     }
 
     return this.prisma.chapterVersion.findMany({
