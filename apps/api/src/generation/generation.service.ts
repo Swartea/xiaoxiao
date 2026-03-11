@@ -14,7 +14,7 @@ import {
   type Chapter,
   type ChapterVersion,
 } from "@prisma/client";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { createPatch } from "diff";
 import {
   buildGenerationContext,
@@ -210,6 +210,47 @@ export class GenerationService {
     if (stage === "draft") return "Draft";
     if (stage === "polish") return "Polish";
     return "Fix";
+  }
+
+  private agentNameByStage(stage: Stage) {
+    if (stage === "beats") return "BeatAgent";
+    if (stage === "draft") return "DraftAgent";
+    if (stage === "polish") return "PolishAgent";
+    return "FixAgent";
+  }
+
+  private async recordAgentRun(args: {
+    runId: string;
+    projectId: string;
+    chapterId: string;
+    versionId: string;
+    stage: Stage;
+    model: string;
+    stylePreset?: string | null;
+    retrieverStrategy?: string;
+    contextHash?: string;
+    qualityScore?: number;
+    inputPayload?: Record<string, unknown>;
+    outputPayload?: Record<string, unknown>;
+  }) {
+    await this.prisma.agentRun.create({
+      data: {
+        run_id: args.runId,
+        project_id: args.projectId,
+        chapter_id: args.chapterId,
+        version_id: args.versionId,
+        agent_name: this.agentNameByStage(args.stage),
+        prompt_version: "legacy:v1",
+        model: args.model,
+        style_preset: args.stylePreset ?? undefined,
+        retriever_strategy: args.retrieverStrategy ?? "hybrid-sql-v1",
+        context_hash: args.contextHash ?? undefined,
+        token_usage: toJson({}),
+        quality_score: args.qualityScore ?? null,
+        input_payload: toJson(args.inputPayload ?? {}),
+        output_payload: toJson(args.outputPayload ?? {}),
+      },
+    });
   }
 
   private normalizeStatusValue(value: unknown): string | null {
@@ -816,12 +857,34 @@ export class GenerationService {
             ? this.modelConfig.polish
             : this.modelConfig.fix;
 
+    const configuredBeatsTimeout = Number.parseInt(process.env.LLM_TIMEOUT_BEATS_MS ?? "", 10);
+    const configuredDraftTimeout = Number.parseInt(process.env.LLM_TIMEOUT_DRAFT_MS ?? "", 10);
+    const configuredPolishTimeout = Number.parseInt(process.env.LLM_TIMEOUT_POLISH_MS ?? "", 10);
+    const configuredFixTimeout = Number.parseInt(process.env.LLM_TIMEOUT_FIX_MS ?? "", 10);
+    const beatsTimeoutMs =
+      Number.isFinite(configuredBeatsTimeout) && configuredBeatsTimeout > 0 ? configuredBeatsTimeout : 240_000;
+    const draftTimeoutMs =
+      Number.isFinite(configuredDraftTimeout) && configuredDraftTimeout > 0 ? configuredDraftTimeout : 300_000;
+    const polishTimeoutMs =
+      Number.isFinite(configuredPolishTimeout) && configuredPolishTimeout > 0 ? configuredPolishTimeout : 480_000;
+    const fixTimeoutMs = Number.isFinite(configuredFixTimeout) && configuredFixTimeout > 0 ? configuredFixTimeout : 420_000;
+
+    const timeoutMs =
+      stage === "beats"
+        ? beatsTimeoutMs
+        : stage === "draft"
+          ? draftTimeoutMs
+          : stage === "polish"
+            ? polishTimeoutMs
+            : fixTimeoutMs;
+
     const result = await this.provider.generateText({
       system: prompt.system,
       user: prompt.user,
       model,
       temperature: stage === "polish" ? 0.8 : 0.6,
       maxTokens: 3000,
+      timeoutMs,
     });
 
     return result.text;
@@ -842,6 +905,9 @@ export class GenerationService {
 
     const target = charCount < CHAPTER_MIN_CHARS ? 3400 : 4500;
     const direction = charCount < CHAPTER_MIN_CHARS ? "扩写" : "压缩";
+    const configuredPolishTimeout = Number.parseInt(process.env.LLM_TIMEOUT_POLISH_MS ?? "", 10);
+    const polishTimeoutMs =
+      Number.isFinite(configuredPolishTimeout) && configuredPolishTimeout > 0 ? configuredPolishTimeout : 480_000;
 
     const result = await this.provider.generateText({
       model: this.modelConfig.polish,
@@ -856,6 +922,7 @@ export class GenerationService {
       ].join("\n"),
       temperature: 0.4,
       maxTokens: 3500,
+      timeoutMs: polishTimeoutMs,
     });
 
     return result.text;
@@ -880,6 +947,10 @@ export class GenerationService {
       return args.text;
     }
 
+    const configuredPolishTimeout = Number.parseInt(process.env.LLM_TIMEOUT_POLISH_MS ?? "", 10);
+    const polishTimeoutMs =
+      Number.isFinite(configuredPolishTimeout) && configuredPolishTimeout > 0 ? configuredPolishTimeout : 480_000;
+
     const result = await this.provider.generateText({
       model: this.modelConfig.polish,
       system: "你是小说文本编辑器。输出连续正文，不要解释。",
@@ -894,6 +965,7 @@ export class GenerationService {
       ].join("\n"),
       temperature: 0.3,
       maxTokens: 3500,
+      timeoutMs: polishTimeoutMs,
     });
 
     return result.text;
@@ -1219,7 +1291,7 @@ export class GenerationService {
     }
 
     try {
-      const { chapter } = await this.resolveChapter(chapterId);
+      const { chapter, project } = await this.resolveChapter(chapterId);
       const k = dto.k ?? 50;
       const retrieved = await this.retrieveMemory(chapter, dto.query_entities ?? [], k);
       const assembled = buildGenerationContext({ k, retrieved });
@@ -1264,6 +1336,8 @@ export class GenerationService {
         text: generatedText,
         parentVersionId: latestVersion?.id,
         meta: {
+          source_stage: stage,
+          prompt_template_version: null,
           provider: this.provider?.name ?? "mock",
           model:
             stage === "beats"
@@ -1271,6 +1345,9 @@ export class GenerationService {
               : stage === "draft"
                 ? this.modelConfig.draft
                 : this.modelConfig.polish,
+          style_preset: project.target_platform ?? null,
+          quality_score: null,
+          manual_accepted: false,
           idempotency_key: idemKey,
           context_hash: assembled.contextHash,
           base_version_id: baseInput?.versionId ?? null,
@@ -1282,6 +1359,32 @@ export class GenerationService {
       const extracted = await this.extractMemoryText(generatedText);
       await this.saveExtractedMemory({ chapter, version, extracted });
       const continuity = await this.runAndPersistContinuity({ chapter, version });
+      await this.recordAgentRun({
+        runId: requestState.request.id,
+        projectId: project.id,
+        chapterId: chapter.id,
+        versionId: version.id,
+        stage,
+        model:
+          stage === "beats"
+            ? this.modelConfig.beats
+            : stage === "draft"
+              ? this.modelConfig.draft
+              : this.modelConfig.polish,
+        stylePreset: project.target_platform,
+        retrieverStrategy: "hybrid-sql-v1",
+        contextHash: assembled.contextHash,
+        inputPayload: {
+          instruction: dto.instruction,
+          query_entities: dto.query_entities ?? [],
+          k,
+          idempotency_key: idemKey,
+        },
+        outputPayload: {
+          version_id: version.id,
+          continuity_report_id: continuity.saved.id,
+        },
+      });
       await this.markRequestSucceeded(requestState.request.id, version.id, continuity.saved.id);
 
       return {
@@ -1350,6 +1453,137 @@ export class GenerationService {
     return { from: target.anchor_span.from, to: target.anchor_span.to };
   }
 
+  private extractPreviewTokens(text: string, limit = 24) {
+    const matches = text.match(/[\u4e00-\u9fa5A-Za-z0-9]{2,}/g) ?? [];
+    const unique: string[] = [];
+    for (const token of matches) {
+      const normalized = token.trim();
+      if (!normalized || unique.includes(normalized)) {
+        continue;
+      }
+      unique.push(normalized);
+      if (unique.length >= limit) {
+        break;
+      }
+    }
+    return unique;
+  }
+
+  private inferPreviewRisk(mode: FixRequest["mode"], impactRatio: number) {
+    if (mode === "rewrite_chapter") {
+      return "high" as const;
+    }
+    if (mode === "rewrite_section") {
+      return impactRatio > 0.5 ? ("high" as const) : ("medium" as const);
+    }
+    if (impactRatio > 0.2) {
+      return "medium" as const;
+    }
+    return "low" as const;
+  }
+
+  async previewFix(chapterId: string, payload: unknown) {
+    const request = fixRequestSchema.parse(payload);
+    const { chapter } = await this.resolveChapter(chapterId);
+
+    const baseVersion = await this.prisma.chapterVersion.findFirst({
+      where: { id: request.base_version_id, chapter_id: chapterId },
+    });
+    if (!baseVersion) {
+      throw new NotFoundException("Base version not found");
+    }
+
+    const latestMemory = await this.prisma.chapterMemory.findFirst({
+      where: { chapter_id: chapterId },
+      orderBy: { created_at: "desc" },
+    });
+
+    const targetSpan = this.resolveTargetSpan(baseVersion, request.mode, request, latestMemory?.scene_list);
+    const targetText = baseVersion.text.slice(targetSpan.from, targetSpan.to);
+    const targetChars = targetText.length;
+    const chapterChars = Math.max(baseVersion.text.length, 1);
+    const impactRatio = Number((targetChars / chapterChars).toFixed(4));
+    const riskLevel = this.inferPreviewRisk(request.mode, impactRatio);
+    const tokens = this.extractPreviewTokens(targetText);
+
+    const [characters, seeds, facts] = await Promise.all([
+      this.prisma.character.findMany({
+        where: { project_id: chapter.project_id },
+        select: { id: true, name: true },
+        take: 100,
+      }),
+      this.prisma.seed.findMany({
+        where: { project_id: chapter.project_id },
+        orderBy: { planted_chapter_no: "desc" },
+        select: { id: true, content: true, status: true, planted_chapter_no: true },
+        take: 120,
+      }),
+      this.prisma.fact.findMany({
+        where: { project_id: chapter.project_id },
+        orderBy: { chapter_no: "desc" },
+        select: { id: true, content: true, chapter_no: true },
+        take: 120,
+      }),
+    ]);
+
+    const touchesToken = (content: string) => tokens.some((token) => content.includes(token));
+    const touchedCharacters = characters
+      .filter((character) => targetText.includes(character.name))
+      .map((character) => character.name)
+      .slice(0, 12);
+    const touchedSeeds = seeds
+      .filter((seed) => touchesToken(seed.content))
+      .map((seed) => ({
+        id: seed.id,
+        status: seed.status,
+        planted_chapter_no: seed.planted_chapter_no,
+        content: seed.content.slice(0, 60),
+      }))
+      .slice(0, 8);
+    const touchedFacts = facts
+      .filter((fact) => touchesToken(fact.content))
+      .map((fact) => ({
+        id: fact.id,
+        chapter_no: fact.chapter_no,
+        content: fact.content.slice(0, 60),
+      }))
+      .slice(0, 8);
+
+    const estimatedOperation =
+      request.mode === "replace_span"
+        ? "仅替换选定片段，正文其他部分保持不变"
+        : request.mode === "rewrite_section"
+          ? "重写场景级片段，可能影响该场景的对话与节奏"
+          : "重写整章，改动范围最大";
+
+    const suggestion =
+      request.mode === "replace_span"
+        ? "建议先执行低强度修复，修复后立即复评。"
+        : request.mode === "rewrite_section"
+          ? "建议锁定角色口吻与伏笔，避免场景重写扩散。"
+          : "建议先备份当前版本并记录禁止改动项。";
+
+    return {
+      preview_id: randomUUID(),
+      chapter_id: chapter.id,
+      base_version_id: baseVersion.id,
+      mode: request.mode,
+      target_span: targetSpan,
+      target_chars: targetChars,
+      chapter_chars: chapterChars,
+      impact_ratio: impactRatio,
+      risk_level: riskLevel,
+      estimated_operation: estimatedOperation,
+      fix_instruction: request.instruction ?? null,
+      touched_entities: {
+        characters: touchedCharacters,
+        seeds: touchedSeeds,
+        facts: touchedFacts,
+      },
+      suggestion,
+    };
+  }
+
   async fix(chapterId: string, payload: unknown, idempotencyKey?: string) {
     const idemKey = this.requireIdempotencyKey(idempotencyKey);
     const request = fixRequestSchema.parse(payload);
@@ -1391,7 +1625,7 @@ export class GenerationService {
     }
 
     try {
-      const { chapter } = await this.resolveChapter(chapterId);
+      const { chapter, project } = await this.resolveChapter(chapterId);
 
       const baseVersion = await this.prisma.chapterVersion.findFirst({
         where: { id: request.base_version_id, chapter_id: chapterId },
@@ -1469,11 +1703,18 @@ export class GenerationService {
         text: newText,
         parentVersionId: baseVersion.id,
         meta: {
+          source_stage: "fix",
+          prompt_template_version: null,
+          model: this.modelConfig.fix,
+          style_preset: project.target_platform ?? null,
+          quality_score: null,
+          manual_accepted: false,
           mode: request.mode,
           base_version_id: baseVersion.id,
           idempotency_key: idemKey,
           strategy_id: request.strategy_id,
           issue_ids: request.issue_ids,
+          instruction: request.instruction ?? null,
           patch,
         },
       });
@@ -1481,6 +1722,28 @@ export class GenerationService {
       const extracted = await this.extractMemoryText(newText);
       await this.saveExtractedMemory({ chapter, version, extracted });
       const continuity = await this.runAndPersistContinuity({ chapter, version });
+      await this.recordAgentRun({
+        runId: requestState.request.id,
+        projectId: project.id,
+        chapterId: chapter.id,
+        versionId: version.id,
+        stage: "fix",
+        model: this.modelConfig.fix,
+        stylePreset: project.target_platform,
+        retrieverStrategy: "hybrid-sql-v1",
+        contextHash: assembled.contextHash,
+        inputPayload: {
+          mode: request.mode,
+          issue_ids: request.issue_ids ?? [],
+          strategy_id: request.strategy_id ?? null,
+          instruction: request.instruction ?? null,
+        },
+        outputPayload: {
+          new_version_id: version.id,
+          continuity_report_id: continuity.saved.id,
+          fix_mode: request.mode,
+        },
+      });
       await this.markRequestSucceeded(requestState.request.id, version.id, continuity.saved.id);
 
       return fixResponseSchema.parse({

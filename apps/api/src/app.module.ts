@@ -16,6 +16,35 @@ import { OutlineController } from "./outline/outline.controller";
 import { OutlineService } from "./outline/outline.service";
 import { BootstrapController } from "./bootstrap/bootstrap.controller";
 import { BootstrapService } from "./bootstrap/bootstrap.service";
+import { StoryosProjectsController } from "./storyos/controllers/storyos-projects.controller";
+import { StoryosChaptersController } from "./storyos/controllers/storyos-chapters.controller";
+import { StoryosService } from "./storyos/storyos.service";
+import { StoryPlannerEngine } from "./storyos/engines/story-planner.engine";
+import { PlotEngine } from "./storyos/engines/plot.engine";
+import { CharacterEngine } from "./storyos/engines/character.engine";
+import { MemoryEngine } from "./storyos/engines/memory.engine";
+import { ContextEngine } from "./storyos/engines/context.engine";
+import { PromptEngine } from "./storyos/engines/prompt.engine";
+import { GenerationEngine } from "./storyos/engines/generation.engine";
+import { QualityEngine } from "./storyos/engines/quality.engine";
+import { ContinuityEvaluatorEngine } from "./storyos/engines/continuity-evaluator.engine";
+import { FixEngine } from "./storyos/engines/fix.engine";
+import { DirectorEngine } from "./storyos/engines/director.engine";
+import { ExperimentEngine } from "./storyos/engines/experiment.engine";
+import { AdaptationEngine } from "./storyos/engines/adaptation.engine";
+import { VersionEngine } from "./storyos/engines/version.engine";
+import { StylePresetRegistry } from "./storyos/engines/style-preset.registry";
+import { RunTraceEngine } from "./storyos/engines/run-trace.engine";
+import { PlannerAgent } from "./storyos/agents/planner.agent";
+import { BeatAgent } from "./storyos/agents/beat.agent";
+import { DraftAgent } from "./storyos/agents/draft.agent";
+import { PolishAgent } from "./storyos/agents/polish.agent";
+import { QualityAgent } from "./storyos/agents/quality.agent";
+import { ContinuityAgent } from "./storyos/agents/continuity.agent";
+import { FixAgent } from "./storyos/agents/fix.agent";
+import { DirectorAgent } from "./storyos/agents/director.agent";
+import { AdaptationAgent } from "./storyos/agents/adaptation.agent";
+import { ChapterPipelineOrchestrator } from "./storyos/orchestrator/chapter-pipeline.orchestrator";
 
 @Module({
   imports: [
@@ -37,6 +66,8 @@ import { BootstrapService } from "./bootstrap/bootstrap.service";
     WorkspaceController,
     OutlineController,
     BootstrapController,
+    StoryosProjectsController,
+    StoryosChaptersController,
   ],
   providers: [
     PrismaService,
@@ -47,6 +78,33 @@ import { BootstrapService } from "./bootstrap/bootstrap.service";
     WorkspaceService,
     OutlineService,
     BootstrapService,
+    StoryosService,
+    StoryPlannerEngine,
+    PlotEngine,
+    CharacterEngine,
+    MemoryEngine,
+    ContextEngine,
+    PromptEngine,
+    GenerationEngine,
+    QualityEngine,
+    ContinuityEvaluatorEngine,
+    FixEngine,
+    DirectorEngine,
+    ExperimentEngine,
+    AdaptationEngine,
+    VersionEngine,
+    StylePresetRegistry,
+    RunTraceEngine,
+    PlannerAgent,
+    BeatAgent,
+    DraftAgent,
+    PolishAgent,
+    QualityAgent,
+    ContinuityAgent,
+    FixAgent,
+    DirectorAgent,
+    AdaptationAgent,
+    ChapterPipelineOrchestrator,
   ],
 })
 export class AppModule {}

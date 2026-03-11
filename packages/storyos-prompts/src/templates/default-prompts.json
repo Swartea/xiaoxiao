@@ -1,0 +1,115 @@
+[
+  {
+    "prompt_name": "beats_prompt",
+    "stage": "beats",
+    "purpose": "Generate structured chapter beats with escalating conflict and ending hook.",
+    "input_schema": {
+      "chapter_intent": "object",
+      "context_brief": "object",
+      "style_preset": "object"
+    },
+    "output_schema": {
+      "beats": "StoryBeat[]"
+    },
+    "versions": [
+      {
+        "prompt_version": 1,
+        "platform_variant": "default",
+        "template": "你是 BeatAgent。基于 chapter_intent/context_brief/style_preset 输出 JSON beats 数组。每个 beat 必须包含 goal/conflict/obstacle/action/reversal/reveal/ending_hook。禁止输出解释。",
+        "is_active": true,
+        "ab_bucket": "A"
+      },
+      {
+        "prompt_version": 2,
+        "platform_variant": "toutiao-fiction",
+        "template": "你是 BeatAgent。输出更短平快节奏：前两拍必须出现直接冲突，末拍必须有强悬念。仅输出 JSON beats。",
+        "is_active": true,
+        "ab_bucket": "B"
+      }
+    ]
+  },
+  {
+    "prompt_name": "draft_prompt",
+    "stage": "draft",
+    "purpose": "Expand beats to chapter draft.",
+    "versions": [
+      {
+        "prompt_version": 1,
+        "platform_variant": "default",
+        "template": "你是 DraftAgent。基于 beats/context_brief/style_preset 写章节正文。遵守角色声音约束、世界规则和伏笔兑现目标。禁止元叙述。",
+        "is_active": true,
+        "ab_bucket": "A"
+      }
+    ]
+  },
+  {
+    "prompt_name": "polish_prompt",
+    "stage": "polish",
+    "purpose": "Polish chapter language and platform fit.",
+    "versions": [
+      {
+        "prompt_version": 1,
+        "platform_variant": "default",
+        "template": "你是 PolishAgent。仅优化表达和节奏，不改变剧情事实、时间线、人物关系、关键数字。提升平台适配与开头/结尾钩子强度。",
+        "is_active": true,
+        "ab_bucket": "A"
+      }
+    ]
+  },
+  {
+    "prompt_name": "quality_eval_prompt",
+    "stage": "quality_eval",
+    "purpose": "Evaluate chapter quality by quantitative dimensions.",
+    "versions": [
+      {
+        "prompt_version": 1,
+        "platform_variant": "default",
+        "template": "你是 QualityAgent。返回 opening_hook/conflict_strength/pacing/dialogue_quality/character_voice/scene_vividness/exposition_control/ending_hook/platform_fit/overall_score，并给出每项原因。",
+        "is_active": true,
+        "ab_bucket": "A"
+      }
+    ]
+  },
+  {
+    "prompt_name": "fix_prompt",
+    "stage": "fix",
+    "purpose": "Perform targeted fixes with strict boundaries.",
+    "versions": [
+      {
+        "prompt_version": 1,
+        "platform_variant": "default",
+        "template": "你是 FixAgent。根据 issue_type/fix_goal/keep_elements/forbidden_changes/target_intensity 定向修复，禁止无关重写。",
+        "is_active": true,
+        "ab_bucket": "A"
+      }
+    ]
+  },
+  {
+    "prompt_name": "director_prompt",
+    "stage": "director",
+    "purpose": "Editor-in-chief level decision making.",
+    "versions": [
+      {
+        "prompt_version": 1,
+        "platform_variant": "default",
+        "template": "你是 DirectorAgent。判断本章是否通过、是否需要重写、修复优先级、下章节奏方向。输出结构化决策。",
+        "is_active": true,
+        "ab_bucket": "A"
+      }
+    ]
+  },
+  {
+    "prompt_name": "adaptation_prompt",
+    "stage": "adaptation",
+    "purpose": "Adapt chapter into script/storyboard assets.",
+    "versions": [
+      {
+        "prompt_version": 1,
+        "platform_variant": "default",
+        "template": "你是 AdaptationAgent。把章节改写为目标格式（script/storyboard），突出场景目标、冲突、镜头和台词。",
+        "is_active": true,
+        "ab_bucket": "A"
+      }
+    ]
+  }
+]

@@ -9,6 +9,21 @@ import { API_BASE } from "@/lib/api";
 
 type Props = { params: Promise<{ id: string }> };
 
+const REQUEST_TIMEOUT_MS = 120_000;
+const CHAPTER_READY_RETRIES = 25;
+const POLL_INTERVAL_MS = 1_200;
+
+function sleep(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function formatErrorMessage(error: unknown, fallback: string) {
+  if (error instanceof Error && error.message.trim()) {
+    return error.message;
+  }
+  return fallback;
+}
+
 export default function DashboardPage({ params }: Props) {
   const router = useRouter();
   const [projectId, setProjectId] = useState<string>("");
@@ -20,30 +35,87 @@ export default function DashboardPage({ params }: Props) {
   const [protagonistBrief, setProtagonistBrief] = useState("");
   const [toneSetting, setToneSetting] = useState("权谋");
   const [bootstrapping, setBootstrapping] = useState(false);
+  const [bootstrapStatus, setBootstrapStatus] = useState("");
   const [bootstrapError, setBootstrapError] = useState("");
 
+  async function requestJson(url: string, init?: RequestInit, timeoutMs = REQUEST_TIMEOUT_MS) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      const method = (init?.method ?? "GET").toUpperCase();
+      const res = await fetch(url, {
+        ...init,
+        cache: method === "GET" ? "no-store" : init?.cache,
+        signal: controller.signal,
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        throw new Error(typeof data?.message === "string" ? data.message : `请求失败: ${res.status}`);
+      }
+      return data;
+    } catch (error) {
+      if (error instanceof DOMException && error.name === "AbortError") {
+        throw new Error(`请求超时（>${Math.ceil(timeoutMs / 1000)}秒）`);
+      }
+      throw error;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  async function reloadDashboard(id: string) {
+    const [projectData, chapterData, projectsData] = await Promise.all([
+      requestJson(`${API_BASE}/projects/${id}`),
+      requestJson(`${API_BASE}/projects/${id}/chapters`),
+      requestJson(`${API_BASE}/projects`),
+    ]);
+    setProject(projectData);
+    setChapters(Array.isArray(chapterData) ? chapterData : []);
+    setTotalProjects(Array.isArray(projectsData) ? projectsData.length : 0);
+  }
+
+  async function waitForChapterReady(id: string, chapterNo: number) {
+    for (let attempt = 1; attempt <= CHAPTER_READY_RETRIES; attempt += 1) {
+      const chapterData = await requestJson(`${API_BASE}/projects/${id}/chapters`);
+      const chapterList = Array.isArray(chapterData) ? chapterData : [];
+      const chapter = chapterList.find((item: any) => Number(item.chapter_no) === chapterNo);
+      if (chapter) {
+        return chapter;
+      }
+      if (attempt < CHAPTER_READY_RETRIES) {
+        setBootstrapStatus(`向导执行中：章节初始化中（${attempt}/${CHAPTER_READY_RETRIES}）...`);
+        await sleep(POLL_INTERVAL_MS);
+      }
+    }
+    return null;
+  }
+
   useEffect(() => {
+    let cancelled = false;
     void (async () => {
-      const { id } = await params;
-      setProjectId(id);
-      const [projectRes, chapterRes, projectsRes] = await Promise.all([
-        fetch(`${API_BASE}/projects/${id}`),
-        fetch(`${API_BASE}/projects/${id}/chapters`),
-        fetch(`${API_BASE}/projects`),
-      ]);
-      setProject(await projectRes.json());
-      setChapters(await chapterRes.json());
-      const projects = await projectsRes.json();
-      setTotalProjects(Array.isArray(projects) ? projects.length : 0);
+      try {
+        const { id } = await params;
+        if (cancelled) return;
+        setProjectId(id);
+        await reloadDashboard(id);
+      } catch (error) {
+        if (!cancelled) {
+          setBootstrapError(formatErrorMessage(error, "项目加载失败，请刷新后重试"));
+        }
+      }
     })();
+    return () => {
+      cancelled = true;
+    };
   }, [params]);
 
   async function runBootstrap() {
     if (!projectId) return;
     setBootstrapError("");
+    setBootstrapStatus("向导执行中：正在初始化圣经、推演全局大纲、生成第一章 Beats...");
     setBootstrapping(true);
     try {
-      const res = await fetch(`${API_BASE}/projects/${projectId}/bootstrap`, {
+      const data = await requestJson(`${API_BASE}/projects/${projectId}/bootstrap`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -56,14 +128,18 @@ export default function DashboardPage({ params }: Props) {
         }),
       });
 
-      const data = await res.json();
-      if (!res.ok) {
-        throw new Error(data?.message || `Bootstrap failed: ${res.status}`);
+      const targetChapterNo = Number(data?.chapter_no) > 0 ? Number(data.chapter_no) : 1;
+      const readyChapter = await waitForChapterReady(projectId, targetChapterNo);
+      if (!readyChapter) {
+        throw new Error("章节初始化超时，请稍后重试。");
       }
 
-      router.push(data.workspace_path ?? `/projects/${projectId}/chapters/1/workspace`);
+      await reloadDashboard(projectId);
+      setBootstrapStatus("初始化完成，正在进入工作台...");
+      router.push(data.workspace_path ?? `/projects/${projectId}/chapters/${targetChapterNo}/workspace`);
     } catch (error) {
-      setBootstrapError(error instanceof Error ? error.message : "启动向导失败，请稍后重试");
+      setBootstrapError(formatErrorMessage(error, "启动向导失败，请稍后重试"));
+      setBootstrapStatus("");
     } finally {
       setBootstrapping(false);
     }
@@ -154,7 +230,7 @@ export default function DashboardPage({ params }: Props) {
 
           {bootstrapping && (
             <div className="rounded-md border border-blue-100 bg-blue-50 px-3 py-2 text-sm text-blue-800">
-              向导执行中：正在初始化圣经、推演全局大纲、生成第一章 Beats...
+              {bootstrapStatus || "向导执行中：正在初始化圣经、推演全局大纲、生成第一章 Beats..."}
             </div>
           )}
 

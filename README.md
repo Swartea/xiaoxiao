@@ -2,6 +2,55 @@
 
 Novel Factory 是一个结构化记忆驱动的小说生产系统。
 
+## StoryOS 增量重构（2026-03）
+
+已新增 StoryOS 模块与可追踪多 Agent 架构，核心流程：
+
+`Planner -> Context -> Prompt -> Generation -> Quality -> Director -> Fix -> Re-eval -> Version -> Experiment`
+
+### 新增目录（核心）
+
+```text
+apps/api/src/storyos/
+  orchestrator/
+  engines/
+  agents/
+  controllers/
+  dto/
+packages/storyos-domain/
+packages/storyos-prompts/
+```
+
+### 新增 API
+
+- `POST /api/projects/:id/blueprint`
+- `POST /api/projects/:id/arcs`
+- `POST /api/chapters/:id/intent`
+- `POST /api/chapters/:id/evaluate`
+- `POST /api/chapters/:id/director-review`
+- `POST /api/chapters/:id/experiment`
+- `POST /api/chapters/:id/adapt/script`
+- `POST /api/chapters/:id/adapt/storyboard`
+- `GET /api/chapters/:id/diagnostics`
+- `GET /api/style-presets`
+- `GET /api/prompt-templates`
+- `POST /api/prompt-templates`
+
+### Prompt 与 Style 系统
+
+- 默认内置 `webnovel / toutiao-fiction / short-drama` 三套 style preset。
+- 新增 PromptTemplate + PromptTemplateVersion，可支持版本切换、A/B 变体与回滚。
+
+### 可追踪字段
+
+新增 `agent_runs` 表，记录：
+
+- `project_id/chapter_id/run_id/agent_name/prompt_version/model/style_preset/retriever_strategy/context_hash/token_usage/quality_score/created_at`
+
+并在 `chapter_versions.meta` 强化存储：
+
+- `source_stage/prompt_template_version/model/style_preset/quality_score/manual_accepted`
+
 ## 已实现能力
 
 - 后端（NestJS + Prisma + PostgreSQL）
