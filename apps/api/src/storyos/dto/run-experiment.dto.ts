@@ -1,4 +1,4 @@
-import { IsEnum, IsNumber, IsOptional, IsString, IsUUID, Max, Min, ValidateNested } from "class-validator";
+import { IsEnum, IsInt, IsNumber, IsOptional, IsString, IsUUID, Max, Min, ValidateNested } from "class-validator";
 import { Type } from "class-transformer";
 
 enum ExperimentTypeDto {
@@ -14,6 +14,23 @@ export class ExperimentVariantDto {
   @IsOptional()
   @IsString()
   prompt_version?: string;
+
+  @IsOptional()
+  @IsUUID()
+  prompt_template_version_id?: string;
+
+  @IsOptional()
+  @IsString()
+  prompt_name?: string;
+
+  @IsOptional()
+  @IsInt()
+  @Min(1)
+  prompt_version_number?: number;
+
+  @IsOptional()
+  @IsString()
+  platform_variant?: string;
 
   @IsOptional()
   @IsString()

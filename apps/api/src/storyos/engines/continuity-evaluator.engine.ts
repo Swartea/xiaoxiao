@@ -14,7 +14,13 @@ export class ContinuityEvaluatorEngine {
     };
 
     for (const issue of raw.issues) {
-      if (issue.type.includes("glossary") || issue.type.includes("ability")) {
+      if (
+        issue.type.includes("glossary") ||
+        issue.type.includes("ability") ||
+        issue.type.includes("sensitive_word") ||
+        issue.type.includes("regex_rule") ||
+        issue.type.includes("confirmed_reference")
+      ) {
         mapped.world_rule_conflict.push(issue.message);
       } else if (issue.type.includes("time") || issue.type.includes("knowledge")) {
         mapped.timeline_conflict.push(issue.message);

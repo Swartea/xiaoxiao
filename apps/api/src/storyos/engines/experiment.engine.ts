@@ -1,4 +1,4 @@
-import { Inject, Injectable, NotFoundException } from "@nestjs/common";
+import { BadRequestException, Inject, Injectable, NotFoundException } from "@nestjs/common";
 import { ExperimentStatus, ExperimentType, Prisma } from "@prisma/client";
 import type { ExperimentVariantDto, RunExperimentDto } from "../dto/run-experiment.dto";
 import { PrismaService } from "../../prisma.service";
@@ -26,6 +26,83 @@ export class ExperimentEngine {
     return ExperimentType.retriever_compare;
   }
 
+  private normalizePromptVersion(variant: ExperimentVariantDto) {
+    if (typeof variant.prompt_version_number === "number") {
+      return variant.prompt_version_number;
+    }
+    if (typeof variant.prompt_version !== "string") {
+      return undefined;
+    }
+    const normalized = Number.parseInt(variant.prompt_version.replace(/[^\d]/g, ""), 10);
+    return Number.isFinite(normalized) && normalized > 0 ? normalized : undefined;
+  }
+
+  private stageFromPromptName(promptName?: string | null) {
+    const normalized = promptName?.trim();
+    if (normalized === "beats_prompt") return "beats" as const;
+    if (normalized === "draft_prompt") return "draft" as const;
+    if (normalized === "polish_prompt") return "polish" as const;
+    if (normalized === "fix_prompt") return "fix" as const;
+    return null;
+  }
+
+  private async resolveExperimentStage(variant: ExperimentVariantDto, type: RunExperimentDto["type"]) {
+    if (type !== "prompt_ab") {
+      return "polish" as const;
+    }
+
+    if (variant.prompt_template_version_id) {
+      const promptVersion = await this.prisma.promptTemplateVersion.findUnique({
+        where: { id: variant.prompt_template_version_id },
+        include: {
+          promptTemplate: {
+            select: {
+              prompt_name: true,
+            },
+          },
+        },
+      });
+      if (!promptVersion) {
+        throw new NotFoundException(`Prompt template version ${variant.prompt_template_version_id} not found`);
+      }
+      const stage = this.stageFromPromptName(promptVersion.promptTemplate.prompt_name);
+      if (stage === "beats" || stage === "draft" || stage === "polish") {
+        return stage;
+      }
+      throw new BadRequestException("Prompt A/B currently supports beats/draft/polish templates only");
+    }
+
+    const stage = this.stageFromPromptName(variant.prompt_name);
+    if (stage === "beats" || stage === "draft" || stage === "polish") {
+      return stage;
+    }
+    throw new BadRequestException("Prompt A/B requires prompt_template_version_id or prompt_name for beats/draft/polish");
+  }
+
+  private assertPromptABVariants(variantA: ExperimentVariantDto, variantB: ExperimentVariantDto) {
+    const sameVersionId =
+      variantA.prompt_template_version_id &&
+      variantB.prompt_template_version_id &&
+      variantA.prompt_template_version_id === variantB.prompt_template_version_id;
+    if (sameVersionId) {
+      throw new BadRequestException("Prompt A/B requires two different prompt template versions");
+    }
+
+    const aKey = [
+      variantA.prompt_name ?? "",
+      this.normalizePromptVersion(variantA) ?? "",
+      variantA.platform_variant ?? "",
+    ].join("|");
+    const bKey = [
+      variantB.prompt_name ?? "",
+      this.normalizePromptVersion(variantB) ?? "",
+      variantB.platform_variant ?? "",
+    ].join("|");
+    if (aKey !== "||" && aKey === bKey) {
+      throw new BadRequestException("Prompt A/B variants must differ");
+    }
+  }
+
   async comparePrompts(chapterId: string, variantA: ExperimentVariantDto, variantB: ExperimentVariantDto) {
     return this.runABTest(chapterId, {
       type: "prompt_ab",
@@ -50,16 +127,27 @@ export class ExperimentEngine {
     });
   }
 
-  private async ensureVariantVersion(chapterId: string, variant: ExperimentVariantDto) {
+  private async ensureVariantVersion(chapterId: string, variant: ExperimentVariantDto, type: RunExperimentDto["type"]) {
     if (variant.version_id) {
-      return variant.version_id;
+      return {
+        version_id: variant.version_id,
+        prompt_template_version_id: variant.prompt_template_version_id ?? null,
+      };
     }
 
+    const stage = await this.resolveExperimentStage(variant, type);
     const generated = await this.generationEngine.generateAlternateVersion(
       chapterId,
-      "polish",
-      `实验分支 ${variant.label}：prompt_version=${variant.prompt_version ?? "default"}, model=${variant.model ?? "default"}, retriever=${variant.retriever_strategy ?? "default"}`,
+      stage,
+      `实验分支 ${variant.label}：聚焦比较当前方案差异，保持章节事实不变。`,
       50,
+      {
+        promptTemplateVersionId: variant.prompt_template_version_id,
+        promptVersion: this.normalizePromptVersion(variant),
+        platformVariant: variant.platform_variant,
+        modelOverride: variant.model,
+        retrieverStrategy: variant.retriever_strategy,
+      },
     );
 
     const versionId = generated?.version?.id as string | undefined;
@@ -67,19 +155,26 @@ export class ExperimentEngine {
       throw new NotFoundException(`Variant ${variant.label} did not produce version`);
     }
 
-    return versionId;
+    const promptMeta = ((generated?.version?.meta ?? {}) as Record<string, unknown>) ?? {};
+    return {
+      version_id: versionId,
+      prompt_template_version_id:
+        variant.prompt_template_version_id ??
+        (typeof promptMeta.prompt_template_version_id === "string" ? promptMeta.prompt_template_version_id : null),
+    };
   }
 
-  private async scoreVariant(chapterId: string, variant: ExperimentVariantDto) {
-    const versionId = await this.ensureVariantVersion(chapterId, variant);
+  private async scoreVariant(chapterId: string, variant: ExperimentVariantDto, type: RunExperimentDto["type"]) {
+    const ensured = await this.ensureVariantVersion(chapterId, variant, type);
     const evaluated = await this.qualityEngine.evaluateChapter({
       chapterId,
-      versionId,
+      versionId: ensured.version_id,
       persist: false,
     });
 
     return {
-      version_id: versionId,
+      version_id: ensured.version_id,
+      prompt_template_version_id: ensured.prompt_template_version_id,
       quality_score: evaluated.evaluation.overall_score,
     };
   }
@@ -128,6 +223,10 @@ export class ExperimentEngine {
       throw new NotFoundException("Chapter not found");
     }
 
+    if (dto.type === "prompt_ab") {
+      this.assertPromptABVariants(dto.variant_a, dto.variant_b);
+    }
+
     const created = await this.prisma.experimentRun.create({
       data: {
         project_id: chapter.project_id,
@@ -141,8 +240,8 @@ export class ExperimentEngine {
 
     try {
       const [scoredA, scoredB] = await Promise.all([
-        this.scoreVariant(chapterId, dto.variant_a),
-        this.scoreVariant(chapterId, dto.variant_b),
+        this.scoreVariant(chapterId, dto.variant_a, dto.type),
+        this.scoreVariant(chapterId, dto.variant_b, dto.type),
       ]);
 
       const winner = this.decideWinner({
@@ -178,7 +277,7 @@ export class ExperimentEngine {
           {
             experiment_run_id: updated.id,
             name: dto.variant_a.label,
-            prompt_template_version_id: null,
+            prompt_template_version_id: scoredA.prompt_template_version_id,
             generated_version_id: scoredA.version_id,
             model: dto.variant_a.model,
             retriever_strategy: dto.variant_a.retriever_strategy,
@@ -189,7 +288,7 @@ export class ExperimentEngine {
           {
             experiment_run_id: updated.id,
             name: dto.variant_b.label,
-            prompt_template_version_id: null,
+            prompt_template_version_id: scoredB.prompt_template_version_id,
             generated_version_id: scoredB.version_id,
             model: dto.variant_b.model,
             retriever_strategy: dto.variant_b.retriever_strategy,
@@ -207,11 +306,13 @@ export class ExperimentEngine {
         variant_a: {
           ...dto.variant_a,
           version_id: scoredA.version_id,
+          prompt_template_version_id: scoredA.prompt_template_version_id ?? dto.variant_a.prompt_template_version_id,
           quality_score: scoredA.quality_score,
         },
         variant_b: {
           ...dto.variant_b,
           version_id: scoredB.version_id,
+          prompt_template_version_id: scoredB.prompt_template_version_id ?? dto.variant_b.prompt_template_version_id,
           quality_score: scoredB.quality_score,
         },
         winner: updated.winner,

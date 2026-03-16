@@ -1,4 +1,4 @@
-import { Inject, Injectable, NotFoundException, OnModuleInit } from "@nestjs/common";
+import { BadRequestException, Inject, Injectable, NotFoundException, OnModuleInit } from "@nestjs/common";
 import { randomUUID } from "node:crypto";
 import type {
   AdaptChapterDto,
@@ -11,6 +11,7 @@ import type {
   RunExperimentDto,
 } from "./dto";
 import { PrismaService } from "../prisma.service";
+import { GenerationService } from "../generation/generation.service";
 import { PlannerAgent } from "./agents/planner.agent";
 import { QualityAgent } from "./agents/quality.agent";
 import { DirectorAgent } from "./agents/director.agent";
@@ -26,6 +27,7 @@ import { StylePresetRegistry } from "./engines/style-preset.registry";
 import { ContextEngine } from "./engines/context.engine";
 import { ChapterPipelineOrchestrator } from "./orchestrator/chapter-pipeline.orchestrator";
 import { RunTraceEngine } from "./engines/run-trace.engine";
+import { StoryReferenceService } from "../story-resources/story-reference.service";
 
 @Injectable()
 export class StoryosService implements OnModuleInit {
@@ -46,6 +48,8 @@ export class StoryosService implements OnModuleInit {
     @Inject(ContextEngine) private readonly contextEngine: ContextEngine,
     @Inject(ChapterPipelineOrchestrator) private readonly orchestrator: ChapterPipelineOrchestrator,
     @Inject(RunTraceEngine) private readonly runTraceEngine: RunTraceEngine,
+    @Inject(StoryReferenceService) private readonly storyReferenceService: StoryReferenceService,
+    @Inject(GenerationService) private readonly generationService: GenerationService,
   ) {}
 
   async onModuleInit() {
@@ -236,10 +240,34 @@ export class StoryosService implements OnModuleInit {
     return this.promptEngine.rollbackPrompt(promptTemplateId, promptVersion);
   }
 
+  previewPromptTemplate(dto: {
+    chapter_id: string;
+    stage: "beats" | "draft" | "polish" | "quality_eval" | "fix" | "director" | "adaptation";
+    prompt_template_version_id?: string;
+    prompt_version?: number;
+    platform_variant?: string;
+    style_preset_name?: string;
+    instruction?: string;
+  }) {
+    if (!["beats", "draft", "polish", "fix"].includes(dto.stage)) {
+      throw new BadRequestException("Preview currently supports beats/draft/polish/fix only");
+    }
+    return this.generationService.previewPrompt({
+      chapterId: dto.chapter_id,
+      stage: dto.stage as "beats" | "draft" | "polish" | "fix",
+      promptTemplateVersionId: dto.prompt_template_version_id,
+      promptVersion: dto.prompt_version,
+      platformVariant: dto.platform_variant,
+      stylePresetName: dto.style_preset_name,
+      instruction: dto.instruction,
+    });
+  }
+
   async buildDiagnostics(chapterId: string) {
     const chapter = await this.resolveChapter(chapterId);
 
-    const [qualityReports, continuityReports, directorReviews, fixTasks, versions, snapshots] = await Promise.all([
+    const [qualityReports, continuityReports, directorReviews, fixTasks, versions, snapshots, chapterReferences] =
+      await Promise.all([
       this.prisma.qualityReport.findMany({
         where: { chapter_id: chapter.id },
         orderBy: { created_at: "desc" },
@@ -270,9 +298,26 @@ export class StoryosService implements OnModuleInit {
         orderBy: { created_at: "desc" },
         take: 1,
       }),
+      this.storyReferenceService.getChapterReferences(chapter.project_id, chapter.id),
     ]);
 
     const latestQuality = qualityReports[0] ?? null;
+    const continuityPayload = (continuityReports[0]?.report ?? {}) as Record<string, any>;
+    const rawIssues = Array.isArray(continuityPayload?.raw?.issues) ? continuityPayload.raw.issues : [];
+    const ruleHits = rawIssues.filter((issue: any) =>
+      ["sensitive_word_hit", "regex_rule_hit", "confirmed_reference_missing"].includes(String(issue?.type ?? "")),
+    );
+    const hotResources = [
+      ...chapterReferences.references.characters,
+      ...chapterReferences.references.glossary,
+      ...chapterReferences.references.timeline,
+      ...chapterReferences.references.relationships,
+      ...chapterReferences.references.sensitive_words,
+      ...chapterReferences.references.regex_rules,
+    ]
+      .slice()
+      .sort((a: any, b: any) => (b?.stats?.total_hits ?? 0) - (a?.stats?.total_hits ?? 0))
+      .slice(0, 6);
 
     return {
       chapter_id: chapter.id,
@@ -282,10 +327,14 @@ export class StoryosService implements OnModuleInit {
         .reverse()
         .map((report) => ({ version_id: report.version_id, overall_score: report.overall_score })),
       continuity: continuityReports[0] ?? null,
+      rule_hits: ruleHits,
       director: directorReviews[0] ?? null,
       fix_actions: fixTasks,
       versions,
       context_snapshot: snapshots[0] ?? null,
+      resource_references: chapterReferences,
+      resource_reference_summary: chapterReferences.summary,
+      hot_resources: hotResources,
     };
   }
 

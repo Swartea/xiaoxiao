@@ -29,6 +29,24 @@ export type RetrievedMemoryPackage = {
   facts: RetrievedItem<{ fact_id: string; content: string; chapter_no: number; known_by_character_ids?: string[] }> [];
   seeds: RetrievedItem<{ seed_id: string; content: string; status: string; planted_chapter_no: number }> [];
   timeline: RetrievedItem<{ event_id: string; time_mark: string; event: string; chapter_no_ref: number }> [];
+  sensitiveWords: RetrievedItem<{
+    term: string;
+    replacement?: string | null;
+    severity: string;
+    notes?: string | null;
+  }> [];
+  regexRules: RetrievedItem<{
+    name: string;
+    pattern: string;
+    flags?: string | null;
+    severity: string;
+    description?: string | null;
+  }> [];
+  referencedResources: Array<{
+    resource_type: string;
+    resource_id: string;
+    state: "confirmed" | "inferred";
+  }>;
   retrieverMeta: RetrieverMeta;
 };
 
@@ -89,5 +107,22 @@ export type ContinuityCheckInput = {
     content: string;
     chapter_no: number;
     known_by_character_ids?: string[];
+  }>;
+  sensitive_words?: Array<{
+    id: string;
+    term: string;
+    replacement?: string | null;
+    severity?: string | null;
+  }>;
+  regex_rules?: Array<{
+    id: string;
+    name: string;
+    pattern: string;
+    flags?: string | null;
+    severity?: string | null;
+  }>;
+  confirmed_references?: Array<{
+    type: string;
+    name: string;
   }>;
 };

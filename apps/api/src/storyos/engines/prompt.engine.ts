@@ -32,6 +32,20 @@ function renderTemplate(template: string, input: Record<string, unknown>) {
   });
 }
 
+function pickTemplateString(value?: string | null, fallback?: string | null) {
+  const primary = value?.trim();
+  if (primary) {
+    return primary;
+  }
+  const fallbackValue = fallback?.trim();
+  return fallbackValue || "";
+}
+
+function normalizePlatformVariant(value?: string | null) {
+  const normalized = value?.trim();
+  return normalized || "default";
+}
+
 @Injectable()
 export class PromptEngine {
   constructor(@Inject(PrismaService) private readonly prisma: PrismaService) {}
@@ -69,10 +83,12 @@ export class PromptEngine {
         }));
 
       for (const version of seed.versions) {
+        const platformVariant = normalizePlatformVariant(version.platform_variant);
         const foundVersion = await this.prisma.promptTemplateVersion.findFirst({
           where: {
             prompt_template_id: template.id,
             prompt_version: version.prompt_version,
+            platform_variant: platformVariant,
           },
         });
 
@@ -83,10 +99,37 @@ export class PromptEngine {
               prompt_template_id: template.id,
               prompt_version: version.prompt_version,
               stage: this.toStage(seed.stage),
-              platform_variant: version.platform_variant,
-              template: version.template,
+              platform_variant: platformVariant,
+              template: version.template ?? version.user_template ?? version.system_template ?? "",
+              system_template: version.system_template,
+              user_template: version.user_template,
+              input_contract: toJson(version.input_contract ?? {}),
+              output_contract: toJson(version.output_contract ?? {}),
               ab_bucket: version.ab_bucket,
               is_active: version.is_active,
+            },
+          });
+        } else if (
+          !foundVersion.system_template ||
+          !foundVersion.user_template ||
+          foundVersion.input_contract === null ||
+          foundVersion.output_contract === null
+        ) {
+          await this.prisma.promptTemplateVersion.update({
+            where: { id: foundVersion.id },
+            data: {
+              template:
+                foundVersion.template ||
+                version.template ||
+                version.user_template ||
+                version.system_template ||
+                "",
+              system_template: foundVersion.system_template ?? version.system_template,
+              user_template: foundVersion.user_template ?? version.user_template,
+              input_contract:
+                foundVersion.input_contract === null ? toJson(version.input_contract ?? {}) : undefined,
+              output_contract:
+                foundVersion.output_contract === null ? toJson(version.output_contract ?? {}) : undefined,
             },
           });
         }
@@ -112,35 +155,76 @@ export class PromptEngine {
   }
 
   async createPromptTemplate(dto: CreatePromptTemplateDto) {
-    const template = await this.prisma.promptTemplate.create({
-      data: {
+    const existing = await this.prisma.promptTemplate.findFirst({
+      where: {
         project_id: dto.project_id ?? null,
         prompt_name: dto.prompt_name,
-        purpose: dto.purpose,
-        status: PromptTemplateStatus.active,
-        input_schema: toJson({}),
-        output_schema: toJson({}),
       },
     });
 
-    for (const version of dto.versions) {
-      await this.prisma.promptTemplateVersion.create({
+    const template =
+      existing ??
+      (await this.prisma.promptTemplate.create({
         data: {
           project_id: dto.project_id ?? null,
-          prompt_template_id: template.id,
-          prompt_version: version.prompt_version,
-          stage: this.toStage(dto.stage),
-          platform_variant: version.platform_variant,
-          template: version.template,
-          ab_bucket: version.ab_bucket,
-          is_active: version.is_active ?? true,
+          prompt_name: dto.prompt_name,
+          purpose: dto.purpose,
+          status: PromptTemplateStatus.active,
+          input_schema: toJson({}),
+          output_schema: toJson({}),
+        },
+      }));
+
+    if (existing) {
+      await this.prisma.promptTemplate.update({
+        where: { id: existing.id },
+        data: {
+          purpose: dto.purpose,
+          status: PromptTemplateStatus.active,
         },
       });
     }
 
+    for (const version of dto.versions) {
+      const platformVariant = normalizePlatformVariant(version.platform_variant);
+      const existingVersion = await this.prisma.promptTemplateVersion.findFirst({
+        where: {
+          prompt_template_id: template.id,
+          prompt_version: version.prompt_version,
+          platform_variant: platformVariant,
+        },
+      });
+
+      const payload = {
+        project_id: dto.project_id ?? null,
+        prompt_template_id: template.id,
+        prompt_version: version.prompt_version,
+        stage: this.toStage(dto.stage),
+        platform_variant: platformVariant,
+        template: version.template ?? version.user_template ?? version.system_template ?? "",
+        system_template: version.system_template,
+        user_template: version.user_template,
+        input_contract: toJson(version.input_contract ?? {}),
+        output_contract: toJson(version.output_contract ?? {}),
+        ab_bucket: version.ab_bucket,
+        is_active: version.is_active ?? true,
+      };
+
+      if (existingVersion) {
+        await this.prisma.promptTemplateVersion.update({
+          where: { id: existingVersion.id },
+          data: payload,
+        });
+      } else {
+        await this.prisma.promptTemplateVersion.create({
+          data: payload,
+        });
+      }
+    }
+
     return this.prisma.promptTemplate.findUnique({
       where: { id: template.id },
-      include: { versions: { orderBy: { prompt_version: "desc" } } },
+      include: { versions: { orderBy: [{ prompt_version: "desc" }, { platform_variant: "asc" }] } },
     });
   }
 
@@ -164,59 +248,142 @@ export class PromptEngine {
   async resolvePrompt(args: {
     promptName: string;
     stage: PromptTemplateStage;
+    promptTemplateVersionId?: string;
     platformVariant?: string;
     promptVersion?: number;
     projectId?: string;
     input: Record<string, unknown>;
   }) {
-    const template = await this.prisma.promptTemplate.findFirst({
-      where: {
-        prompt_name: args.promptName,
-        OR: [{ project_id: args.projectId ?? "" }, { project_id: null }],
-      },
-      orderBy: { project_id: "desc" },
-    });
+    const template = args.projectId
+      ? (await this.prisma.promptTemplate.findFirst({
+          where: {
+            prompt_name: args.promptName,
+            project_id: args.projectId,
+          },
+        })) ??
+        (await this.prisma.promptTemplate.findFirst({
+          where: {
+            prompt_name: args.promptName,
+            project_id: null,
+          },
+        }))
+      : await this.prisma.promptTemplate.findFirst({
+          where: {
+            prompt_name: args.promptName,
+            project_id: null,
+          },
+        });
 
     if (!template) {
       return {
         prompt_name: args.promptName,
-        prompt_version: "builtin:1",
-        rendered: JSON.stringify(args.input),
+        prompt_version: "fallback:legacy",
+        platform_variant: args.platformVariant ?? "default",
+        system_rendered: "",
+        user_rendered: JSON.stringify(args.input, null, 2),
+        raw_system_template: "",
+        raw_user_template: "",
       };
     }
 
-    const version = args.promptVersion
+    let version = args.promptTemplateVersionId
       ? await this.prisma.promptTemplateVersion.findFirst({
           where: {
-            prompt_template_id: template.id,
-            prompt_version: args.promptVersion,
+            id: args.promptTemplateVersionId,
             stage: args.stage,
+            promptTemplate: {
+              is: {
+                prompt_name: args.promptName,
+              },
+            },
           },
         })
-      : await this.prisma.promptTemplateVersion.findFirst({
-          where: {
-            prompt_template_id: template.id,
-            stage: args.stage,
-            is_active: true,
-            OR: [{ platform_variant: args.platformVariant ?? "default" }, { platform_variant: "default" }],
-          },
-          orderBy: [{ platform_variant: "desc" }, { prompt_version: "desc" }],
-        });
+      : null;
+
+    if (!version && args.promptVersion) {
+      version = await this.prisma.promptTemplateVersion.findFirst({
+        where: {
+          prompt_template_id: template.id,
+          prompt_version: args.promptVersion,
+          stage: args.stage,
+          platform_variant: normalizePlatformVariant(args.platformVariant),
+        },
+      });
+    }
+
+    if (!version && args.promptVersion) {
+      version = await this.prisma.promptTemplateVersion.findFirst({
+        where: {
+          prompt_template_id: template.id,
+          prompt_version: args.promptVersion,
+          stage: args.stage,
+          platform_variant: "default",
+        },
+      });
+    }
+
+    if (!version && args.platformVariant && args.platformVariant !== "default") {
+      version = await this.prisma.promptTemplateVersion.findFirst({
+        where: {
+          prompt_template_id: template.id,
+          stage: args.stage,
+          is_active: true,
+          platform_variant: normalizePlatformVariant(args.platformVariant),
+        },
+        orderBy: [{ prompt_version: "desc" }],
+      });
+    }
+
+    if (!version) {
+      version = await this.prisma.promptTemplateVersion.findFirst({
+        where: {
+          prompt_template_id: template.id,
+          stage: args.stage,
+          is_active: true,
+          platform_variant: "default",
+        },
+        orderBy: [{ prompt_version: "desc" }],
+      });
+    }
+
+    if (!version) {
+      version = await this.prisma.promptTemplateVersion.findFirst({
+        where: {
+          prompt_template_id: template.id,
+          stage: args.stage,
+          is_active: true,
+        },
+        orderBy: [{ prompt_version: "desc" }],
+      });
+    }
 
     if (!version) {
       return {
         prompt_name: template.prompt_name,
-        prompt_version: "builtin:1",
-        rendered: JSON.stringify(args.input),
+        prompt_version: "fallback:legacy",
+        platform_variant: args.platformVariant ?? "default",
+        system_rendered: "",
+        user_rendered: JSON.stringify(args.input, null, 2),
+        raw_system_template: "",
+        raw_user_template: "",
       };
     }
+
+    const rawSystemTemplate = pickTemplateString(version.system_template, "");
+    const rawUserTemplate = pickTemplateString(version.user_template, version.template);
 
     return {
       prompt_name: template.prompt_name,
       prompt_version: `v${version.prompt_version}`,
       prompt_template_version_id: version.id,
-      rendered: renderTemplate(version.template, args.input),
+      platform_variant: version.platform_variant,
+      system_rendered: renderTemplate(rawSystemTemplate, args.input),
+      user_rendered: renderTemplate(rawUserTemplate, args.input),
+      raw_system_template: rawSystemTemplate,
+      raw_user_template: rawUserTemplate,
       raw_template: version.template,
+      input_contract: version.input_contract,
+      output_contract: version.output_contract,
     };
   }
 }

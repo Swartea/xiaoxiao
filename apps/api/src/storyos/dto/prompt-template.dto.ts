@@ -1,5 +1,16 @@
 import { Type } from "class-transformer";
-import { IsArray, IsBoolean, IsEnum, IsInt, IsOptional, IsString, IsUUID, Min, ValidateNested } from "class-validator";
+import {
+  IsArray,
+  IsBoolean,
+  IsEnum,
+  IsInt,
+  IsObject,
+  IsOptional,
+  IsString,
+  IsUUID,
+  Min,
+  ValidateNested,
+} from "class-validator";
 
 enum PromptStageDto {
   beats = "beats",
@@ -19,8 +30,25 @@ export class PromptTemplateVersionCreateDto {
   @IsString()
   platform_variant!: string;
 
+  @IsOptional()
   @IsString()
-  template!: string;
+  template?: string;
+
+  @IsOptional()
+  @IsString()
+  system_template?: string;
+
+  @IsOptional()
+  @IsString()
+  user_template?: string;
+
+  @IsOptional()
+  @IsObject()
+  input_contract?: Record<string, unknown>;
+
+  @IsOptional()
+  @IsObject()
+  output_contract?: Record<string, unknown>;
 
   @IsOptional()
   @IsString()
@@ -55,4 +83,33 @@ export class RollbackPromptTemplateDto {
   @IsInt()
   @Min(1)
   prompt_version!: number;
+}
+
+export class PromptTemplatePreviewDto {
+  @IsUUID()
+  chapter_id!: string;
+
+  @IsEnum(PromptStageDto)
+  stage!: "beats" | "draft" | "polish" | "quality_eval" | "fix" | "director" | "adaptation";
+
+  @IsOptional()
+  @IsUUID()
+  prompt_template_version_id?: string;
+
+  @IsOptional()
+  @IsInt()
+  @Min(1)
+  prompt_version?: number;
+
+  @IsOptional()
+  @IsString()
+  platform_variant?: string;
+
+  @IsOptional()
+  @IsString()
+  style_preset_name?: string;
+
+  @IsOptional()
+  @IsString()
+  instruction?: string;
 }

@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Inject, Param, Post, Query } from "@nestjs/common";
+import { Body, Controller, Get, Inject, Param, ParseIntPipe, Post, Query } from "@nestjs/common";
 import { ChaptersService } from "./chapters.service";
 import { CreateChapterDto, RollbackChapterDto } from "./dto";
 
@@ -19,6 +19,11 @@ export class ChaptersController {
   @Get("projects/:projectId/chapters")
   listProjectChapters(@Param("projectId") projectId: string) {
     return this.chaptersService.listProjectChapters(projectId);
+  }
+
+  @Get("projects/:projectId/chapters/by-no/:chapterNo")
+  getChapterByNo(@Param("projectId") projectId: string, @Param("chapterNo", ParseIntPipe) chapterNo: number) {
+    return this.chaptersService.getChapterByNo(projectId, chapterNo);
   }
 
   @Get("chapters/:chapterId")

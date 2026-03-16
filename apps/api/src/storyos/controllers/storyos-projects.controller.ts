@@ -1,6 +1,12 @@
 import { Body, Controller, Get, Inject, Param, Post, Query } from "@nestjs/common";
 import { StoryosService } from "../storyos.service";
-import { CreateArcPlanDto, CreateBlueprintDto, CreatePromptTemplateDto, RollbackPromptTemplateDto } from "../dto";
+import {
+  CreateArcPlanDto,
+  CreateBlueprintDto,
+  CreatePromptTemplateDto,
+  PromptTemplatePreviewDto,
+  RollbackPromptTemplateDto,
+} from "../dto";
 
 @Controller()
 export class StoryosProjectsController {
@@ -39,5 +45,10 @@ export class StoryosProjectsController {
   @Post("prompt-templates/:id/rollback")
   rollbackPromptTemplate(@Param("id") promptTemplateId: string, @Body() dto: RollbackPromptTemplateDto) {
     return this.storyosService.rollbackPromptTemplate(promptTemplateId, dto.prompt_version);
+  }
+
+  @Post("prompt-templates/preview")
+  previewPromptTemplate(@Body() dto: PromptTemplatePreviewDto) {
+    return this.storyosService.previewPromptTemplate(dto);
   }
 }

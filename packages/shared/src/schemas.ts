@@ -14,6 +14,21 @@ export const sourceSpanSchema = z
 export const generationContextSchema = z.object({
   bible_summary: z.string(),
   constraints: z.array(z.string()),
+  safety_rules: z.array(
+    z.object({
+      kind: z.string(),
+      label: z.string(),
+      value: z.string(),
+      severity: z.string().optional().nullable(),
+    }),
+  ),
+  referenced_resources: z.array(
+    z.object({
+      resource_type: z.string(),
+      resource_id: z.string(),
+      state: z.enum(["confirmed", "inferred"]),
+    }),
+  ),
   recent_chapter_summaries: z.array(
     z.object({
       chapter_no: z.number().int().nonnegative(),
@@ -107,6 +122,13 @@ export const fixRequestSchema = z
       })
       .optional(),
     issue_ids: z.array(z.string()).optional(),
+    issue_type: z.string().optional(),
+    keep_elements: z.array(z.string()).optional(),
+    forbidden_changes: z.array(z.string()).optional(),
+    target_intensity: z.string().optional(),
+    prompt_template_version_id: z.string().uuid().optional(),
+    platform_variant: z.string().optional(),
+    style_preset_name: z.string().optional(),
     strategy_id: z.string().optional(),
     instruction: z.string().optional(),
   })

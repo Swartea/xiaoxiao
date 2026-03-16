@@ -41,6 +41,28 @@ enum RelationType {
   unknown
 }
 
+enum ResourceType {
+  character
+  glossary
+  sensitive_word
+  regex_rule
+  timeline_event
+  relationship
+}
+
+enum ResourceReferenceState {
+  inferred
+  confirmed
+  ignored
+}
+
+enum ResourceReferenceOrigin {
+  migration
+  extractor
+  generation
+  manual
+}
+
 enum SeedStatus {
   planted
   in_progress
@@ -132,6 +154,8 @@ model Project {
   relationships          Relationship[]
   bibleEntities          BibleEntity[]
   glossaryTerms          GlossaryTerm[]
+  sensitiveWords         SensitiveWord[]
+  regexRules             RegexRule[]
   chapters               Chapter[]
   outlineNodes           StoryOutlineNode[]
   facts                  Fact[]
@@ -151,6 +175,7 @@ model Project {
   contextSnapshots       ContextSnapshot[]
   agentRuns              AgentRun[]
   adaptationArtifacts    AdaptationArtifact[]
+  resourceReferences     ResourceReference[]
 
   @@map("projects")
 }
@@ -256,6 +281,41 @@ model GlossaryTerm {
   @@map("glossary_terms")
 }
 
+model SensitiveWord {
+  id         String   @id @default(uuid()) @db.Uuid
+  project_id String   @db.Uuid
+  term       String
+  replacement String?
+  severity   Severity @default(med)
+  notes      String?
+  enabled    Boolean  @default(true)
+  created_at DateTime @default(now())
+  updated_at DateTime @updatedAt
+
+  project Project @relation(fields: [project_id], references: [id], onDelete: Cascade)
+
+  @@index([project_id, enabled])
+  @@map("sensitive_words")
+}
+
+model RegexRule {
+  id          String   @id @default(uuid()) @db.Uuid
+  project_id  String   @db.Uuid
+  name        String
+  pattern     String
+  flags       String?
+  severity    Severity @default(med)
+  description String?
+  enabled     Boolean  @default(true)
+  created_at  DateTime @default(now())
+  updated_at  DateTime @updatedAt
+
+  project Project @relation(fields: [project_id], references: [id], onDelete: Cascade)
+
+  @@index([project_id, enabled])
+  @@map("regex_rules")
+}
+
 model Chapter {
   id          String        @id @default(uuid()) @db.Uuid
   project_id  String        @db.Uuid
@@ -285,6 +345,7 @@ model Chapter {
   contextSnapshots           ContextSnapshot[]
   agentRuns                  AgentRun[]
   adaptationArtifacts        AdaptationArtifact[]
+  resourceReferences         ResourceReference[]
 
   @@unique([project_id, chapter_no])
   @@index([project_id])
@@ -321,6 +382,7 @@ model ChapterVersion {
   experimentVariants  ExperimentVariant[]  @relation("ExperimentGeneratedVersion")
   agentRuns           AgentRun[]
   adaptationArtifacts AdaptationArtifact[]
+  resourceReferences  ResourceReference[]
 
   @@unique([chapter_id, version_no])
   @@index([chapter_id])
@@ -597,8 +659,12 @@ model PromptTemplateVersion {
   prompt_template_id String              @db.Uuid
   prompt_version     Int
   stage              PromptTemplateStage
-  platform_variant   String?
+  platform_variant   String              @default("default")
   template           String
+  system_template    String?
+  user_template      String?
+  input_contract     Json?
+  output_contract    Json?
   ab_bucket          String?
   is_active          Boolean             @default(true)
   created_at         DateTime            @default(now())
@@ -606,8 +672,9 @@ model PromptTemplateVersion {
   project            Project?            @relation(fields: [project_id], references: [id], onDelete: Cascade)
   promptTemplate     PromptTemplate      @relation(fields: [prompt_template_id], references: [id], onDelete: Cascade)
   experimentVariants ExperimentVariant[] @relation("ExperimentPromptTemplateVersion")
+  agentRuns          AgentRun[]
 
-  @@unique([prompt_template_id, prompt_version])
+  @@unique([prompt_template_id, prompt_version, platform_variant])
   @@index([project_id, stage])
   @@map("prompt_template_versions")
 }
@@ -781,7 +848,10 @@ model AgentRun {
   chapter_id         String?  @db.Uuid
   version_id         String?  @db.Uuid
   agent_name         String
+  prompt_name        String?
   prompt_version     String?
+  prompt_template_version_id String? @db.Uuid
+  platform_variant   String?
   model              String?
   style_preset       String?
   retriever_strategy String?
@@ -795,9 +865,11 @@ model AgentRun {
   project Project         @relation(fields: [project_id], references: [id], onDelete: Cascade)
   chapter Chapter?        @relation(fields: [chapter_id], references: [id], onDelete: SetNull)
   version ChapterVersion? @relation(fields: [version_id], references: [id], onDelete: SetNull)
+  promptTemplateVersion PromptTemplateVersion? @relation(fields: [prompt_template_version_id], references: [id], onDelete: SetNull)
 
   @@index([project_id, chapter_id, created_at])
   @@index([run_id])
+  @@index([prompt_template_version_id])
   @@map("agent_runs")
 }
 
@@ -818,4 +890,30 @@ model AdaptationArtifact {
 
   @@index([chapter_id, adaptation_type, created_at])
   @@map("adaptation_artifacts")
+}
+
+model ResourceReference {
+  id               String                  @id @default(uuid()) @db.Uuid
+  project_id       String                  @db.Uuid
+  chapter_id       String                  @db.Uuid
+  version_id       String?                 @db.Uuid
+  resource_type    ResourceType
+  resource_id      String                  @db.Uuid
+  state            ResourceReferenceState  @default(inferred)
+  origin           ResourceReferenceOrigin @default(extractor)
+  confidence       Float?
+  occurrence_count Int                     @default(0)
+  evidence_json    Json?
+  created_at       DateTime                @default(now())
+  updated_at       DateTime                @updatedAt
+
+  project Project         @relation(fields: [project_id], references: [id], onDelete: Cascade)
+  chapter Chapter         @relation(fields: [chapter_id], references: [id], onDelete: Cascade)
+  version ChapterVersion? @relation(fields: [version_id], references: [id], onDelete: SetNull)
+
+  @@unique([chapter_id, resource_type, resource_id])
+  @@index([project_id, resource_type, resource_id])
+  @@index([chapter_id, state])
+  @@index([version_id])
+  @@map("resource_references")
 }

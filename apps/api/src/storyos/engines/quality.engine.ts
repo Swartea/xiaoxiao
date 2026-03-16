@@ -3,6 +3,8 @@ import { Prisma } from "@prisma/client";
 import { runContinuityCheck } from "@novel-factory/memory";
 import { chapterEvaluationSchema, type ChapterEvaluation } from "@novel-factory/storyos-domain";
 import { PrismaService } from "../../prisma.service";
+import { StoryReferenceService } from "../../story-resources/story-reference.service";
+import { StoryResourcesService } from "../../story-resources/story-resources.service";
 
 function clampScore(value: number) {
   return Math.max(0, Math.min(10, Number(value.toFixed(2))));
@@ -28,7 +30,11 @@ function toJson(value: unknown): Prisma.InputJsonValue {
 
 @Injectable()
 export class QualityEngine {
-  constructor(@Inject(PrismaService) private readonly prisma: PrismaService) {}
+  constructor(
+    @Inject(PrismaService) private readonly prisma: PrismaService,
+    @Inject(StoryResourcesService) private readonly storyResourcesService: StoryResourcesService,
+    @Inject(StoryReferenceService) private readonly storyReferenceService: StoryReferenceService,
+  ) {}
 
   private scoreOpeningHook(text: string) {
     const opening = text.slice(0, 420);
@@ -164,7 +170,13 @@ export class QualityEngine {
     };
 
     for (const issue of issues) {
-      if (issue.type.includes("glossary") || issue.type.includes("ability")) {
+      if (
+        issue.type.includes("glossary") ||
+        issue.type.includes("ability") ||
+        issue.type.includes("sensitive_word") ||
+        issue.type.includes("regex_rule") ||
+        issue.type.includes("confirmed_reference")
+      ) {
         mapped.world_rule_conflict.push(issue.message);
         continue;
       }
@@ -184,6 +196,26 @@ export class QualityEngine {
     }
 
     return mapped;
+  }
+
+  private buildConfirmedReferences(chapterReferences: any) {
+    return [
+      ...chapterReferences.references.characters
+        .filter((item: any) => item.state === "confirmed")
+        .map((item: any) => ({ type: "character", name: item.resource?.name ?? "" })),
+      ...chapterReferences.references.glossary
+        .filter((item: any) => item.state === "confirmed")
+        .map((item: any) => ({ type: "glossary", name: item.resource?.term ?? item.resource?.canonical_form ?? "" })),
+      ...chapterReferences.references.timeline
+        .filter((item: any) => item.state === "confirmed")
+        .map((item: any) => ({ type: "timeline", name: item.resource?.event ?? item.resource?.time_mark ?? "" })),
+      ...chapterReferences.references.relationships
+        .filter((item: any) => item.state === "confirmed")
+        .map((item: any) => ({
+          type: "relationship",
+          name: `${item.resource?.fromCharacter?.name ?? ""}-${item.resource?.toCharacter?.name ?? ""}`.replace(/^-|-$/g, ""),
+        })),
+    ].filter((item) => item.name.trim().length > 0);
   }
 
   async evaluateChapter(args: {
@@ -229,11 +261,13 @@ export class QualityEngine {
           })
         : null;
 
-    const [glossary, characters, facts] = await Promise.all([
-      this.prisma.glossaryTerm.findMany({ where: { project_id: chapter.project_id } }),
-      this.prisma.character.findMany({ where: { project_id: chapter.project_id } }),
+    const [resourceBundle, chapterReferences, facts] = await Promise.all([
+      this.storyResourcesService.getProjectResourceBundle(chapter.project_id),
+      this.storyReferenceService.getChapterReferences(chapter.project_id, chapter.id),
       this.prisma.fact.findMany({ where: { project_id: chapter.project_id } }),
     ]);
+    const glossary = resourceBundle.glossary;
+    const characters = resourceBundle.characters;
 
     const openingHook = this.scoreOpeningHook(version.text);
     const conflictStrength = this.scoreConflict(version.text);
@@ -277,6 +311,20 @@ export class QualityEngine {
         chapter_no: item.chapter_no,
         known_by_character_ids: item.known_by_character_ids,
       })),
+      sensitive_words: resourceBundle.sensitiveWords.map((item) => ({
+        id: item.id,
+        term: item.term,
+        replacement: item.replacement,
+        severity: item.severity,
+      })),
+      regex_rules: resourceBundle.regexRules.map((item) => ({
+        id: item.id,
+        name: item.name,
+        pattern: item.pattern,
+        flags: item.flags,
+        severity: item.severity,
+      })),
+      confirmed_references: this.buildConfirmedReferences(chapterReferences),
     });
 
     const continuityMapped = this.mapContinuityIssues(

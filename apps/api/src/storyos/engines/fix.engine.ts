@@ -164,6 +164,10 @@ export class FixEngine {
         base_version_id: args.baseVersionId,
         mode: "replace_span" as const,
         span: { from: 0, to: Math.min(320, args.baseText.length) },
+        issue_type: args.issueType,
+        keep_elements: args.keepElements,
+        forbidden_changes: args.forbiddenChanges,
+        target_intensity: args.targetIntensity,
         strategy_id: "opening-hook-upgrade",
         instruction: `${args.fixGoal}；保留：${args.keepElements.join("、")}；禁止：${args.forbiddenChanges.join("、")}；强度：${args.targetIntensity}`,
       };
@@ -175,6 +179,10 @@ export class FixEngine {
         base_version_id: args.baseVersionId,
         mode: "replace_span" as const,
         span: { from, to: args.baseText.length },
+        issue_type: args.issueType,
+        keep_elements: args.keepElements,
+        forbidden_changes: args.forbiddenChanges,
+        target_intensity: args.targetIntensity,
         strategy_id: "ending-hook-upgrade",
         instruction: `${args.fixGoal}；保留：${args.keepElements.join("、")}；禁止：${args.forbiddenChanges.join("、")}；强度：${args.targetIntensity}`,
       };
@@ -185,6 +193,10 @@ export class FixEngine {
         base_version_id: args.baseVersionId,
         mode: "rewrite_section" as const,
         section: { scene_index: 0 },
+        issue_type: args.issueType,
+        keep_elements: args.keepElements,
+        forbidden_changes: args.forbiddenChanges,
+        target_intensity: args.targetIntensity,
         strategy_id: "dialogue-quality-upgrade",
         instruction: `${args.fixGoal}；保留：${args.keepElements.join("、")}；禁止：${args.forbiddenChanges.join("、")}；强度：${args.targetIntensity}`,
       };
@@ -194,6 +206,10 @@ export class FixEngine {
       return {
         base_version_id: args.baseVersionId,
         mode: "rewrite_chapter" as const,
+        issue_type: args.issueType,
+        keep_elements: args.keepElements,
+        forbidden_changes: args.forbiddenChanges,
+        target_intensity: args.targetIntensity,
         strategy_id: "pacing-rewrite",
         instruction: `${args.fixGoal}；保留：${args.keepElements.join("、")}；禁止：${args.forbiddenChanges.join("、")}；强度：${args.targetIntensity}`,
       };
@@ -202,6 +218,10 @@ export class FixEngine {
     return {
       base_version_id: args.baseVersionId,
       mode: "rewrite_chapter" as const,
+      issue_type: args.issueType,
+      keep_elements: args.keepElements,
+      forbidden_changes: args.forbiddenChanges,
+      target_intensity: args.targetIntensity,
       strategy_id: "continuity-fix",
       instruction: `${args.fixGoal}；保留：${args.keepElements.join("、")}；禁止：${args.forbiddenChanges.join("、")}；强度：${args.targetIntensity}`,
     };

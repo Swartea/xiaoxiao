@@ -4,6 +4,7 @@ import { createHash } from "node:crypto";
 import { Prisma, VersionStage } from "@prisma/client";
 import { PrismaService } from "../prisma.service";
 import { CreateChapterDto, RollbackChapterDto } from "./dto";
+import { summarizeVersionMeta } from "./version-meta.util";
 
 function textHash(text: string): string {
   return createHash("sha256").update(text).digest("hex");
@@ -30,21 +31,6 @@ function compactSummaryFromText(text: string, maxLength = 220): string {
     .replace(/\s+/g, " ")
     .trim();
   return normalized.slice(0, maxLength) || "请根据上一章正文补充摘要。";
-}
-
-function pickMetaString(meta: unknown, key: string): string | null {
-  if (!meta || typeof meta !== "object" || Array.isArray(meta)) {
-    return null;
-  }
-  const value = (meta as Record<string, unknown>)[key];
-  return typeof value === "string" && value.trim().length > 0 ? value : null;
-}
-
-function excerptText(value: string | null, maxLength = 120): string | null {
-  if (!value) {
-    return null;
-  }
-  return value.length > maxLength ? `${value.slice(0, maxLength)}...` : value;
 }
 
 @Injectable()
@@ -237,6 +223,21 @@ export class ChaptersService {
     });
   }
 
+  async getChapterByNo(projectId: string, chapterNo: number) {
+    const chapter = await this.prisma.chapter.findFirst({
+      where: {
+        project_id: projectId,
+        chapter_no: chapterNo,
+      },
+    });
+
+    if (!chapter) {
+      throw new NotFoundException("Chapter not found");
+    }
+
+    return chapter;
+  }
+
   async getChapter(chapterId: string) {
     const chapter = await this.prisma.chapter.findUnique({
       where: { id: chapterId },
@@ -274,16 +275,7 @@ export class ChaptersService {
         },
       });
 
-      return versions.map((version) => ({
-        id: version.id,
-        version_no: version.version_no,
-        stage: version.stage,
-        created_at: version.created_at,
-        parent_version_id: version.parent_version_id,
-        fix_mode: pickMetaString(version.meta, "mode"),
-        strategy_id: pickMetaString(version.meta, "strategy_id"),
-        instruction_excerpt: excerptText(pickMetaString(version.meta, "instruction")),
-      }));
+      return versions.map((version) => summarizeVersionMeta(version));
     }
 
     return this.prisma.chapterVersion.findMany({
