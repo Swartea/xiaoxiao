@@ -10,6 +10,12 @@ import { DirectorEngine } from "../engines/director.engine";
 import { FixEngine } from "../engines/fix.engine";
 import { VersionEngine } from "../engines/version.engine";
 import { RunTraceEngine } from "../engines/run-trace.engine";
+import { ChaptersService } from "../../chapters/chapters.service";
+import {
+  buildFixExhaustionBlock,
+  buildQualityFailBlock,
+  detectSevereEvaluationContinuity,
+} from "../../chapters/review-block";
 
 @Injectable()
 export class ChapterPipelineOrchestrator {
@@ -23,6 +29,7 @@ export class ChapterPipelineOrchestrator {
     @Inject(FixEngine) private readonly fixEngine: FixEngine,
     @Inject(VersionEngine) private readonly versionEngine: VersionEngine,
     @Inject(RunTraceEngine) private readonly runTraceEngine: RunTraceEngine,
+    @Inject(ChaptersService) private readonly chaptersService: ChaptersService,
   ) {}
 
   async runChapterPipeline(chapterId: string, options?: { style_preset?: string; retriever_strategy?: string }) {
@@ -30,6 +37,7 @@ export class ChapterPipelineOrchestrator {
     if (!chapter) {
       throw new NotFoundException("Chapter not found");
     }
+    this.chaptersService.assertAutomationAllowed(chapter, "自动流水线");
 
     const runId = randomUUID();
 
@@ -137,6 +145,69 @@ export class ChapterPipelineOrchestrator {
       review,
     });
 
+    const continuityBlock = detectSevereEvaluationContinuity(evaluated.evaluation);
+    if (continuityBlock) {
+      const blockedReview = await this.chaptersService.blockChapterReview({
+        chapterId: chapter.id,
+        reason: continuityBlock.reason,
+        source: continuityBlock.source,
+        details: continuityBlock.details,
+        versionId: polishVersionId,
+        reportId: evaluated.continuity_report_id ?? null,
+      });
+      return {
+        run_id: runId,
+        chapter_id: chapterId,
+        stage_versions: {
+          beats_version_id: (beatsResult.version as { id: string }).id,
+          draft_version_id: (draftResult.version as { id: string }).id,
+          polish_version_id: polishVersionId,
+          final_version_id: polishVersionId,
+        },
+        director_review: review,
+        fix_actions: [],
+        final_evaluation: evaluated.evaluation,
+        blocked_review: {
+          status: blockedReview.status,
+          reason: blockedReview.review_block_reason,
+          meta: blockedReview.review_block_meta,
+        },
+      };
+    }
+
+    if (review.should_regenerate) {
+      const blocked = buildQualityFailBlock({
+        summary: review.summary ?? evaluated.evaluation.summary,
+        diagnostics: evaluated.evaluation.diagnostics,
+      });
+      const blockedReview = await this.chaptersService.blockChapterReview({
+        chapterId: chapter.id,
+        reason: blocked.reason,
+        source: blocked.source,
+        details: blocked.details,
+        versionId: polishVersionId,
+        reportId: evaluated.continuity_report_id ?? null,
+      });
+      return {
+        run_id: runId,
+        chapter_id: chapterId,
+        stage_versions: {
+          beats_version_id: (beatsResult.version as { id: string }).id,
+          draft_version_id: (draftResult.version as { id: string }).id,
+          polish_version_id: polishVersionId,
+          final_version_id: polishVersionId,
+        },
+        director_review: review,
+        fix_actions: [],
+        final_evaluation: evaluated.evaluation,
+        blocked_review: {
+          status: blockedReview.status,
+          reason: blockedReview.review_block_reason,
+          meta: blockedReview.review_block_meta,
+        },
+      };
+    }
+
     let finalVersionId = polishVersionId;
     let finalEvaluation = evaluated.evaluation;
     const fixActions: Array<{ task_id: string; new_version_id: string }> = [];
@@ -164,10 +235,75 @@ export class ChapterPipelineOrchestrator {
 
         finalEvaluation = reevaluated.evaluation;
 
+        const blockedReview = detectSevereEvaluationContinuity(finalEvaluation);
+        if (blockedReview) {
+          const savedBlock = await this.chaptersService.blockChapterReview({
+            chapterId: chapter.id,
+            reason: blockedReview.reason,
+            source: blockedReview.source,
+            details: blockedReview.details,
+            versionId: finalVersionId,
+            reportId: reevaluated.continuity_report_id ?? null,
+          });
+          return {
+            run_id: runId,
+            chapter_id: chapterId,
+            stage_versions: {
+              beats_version_id: (beatsResult.version as { id: string }).id,
+              draft_version_id: (draftResult.version as { id: string }).id,
+              polish_version_id: polishVersionId,
+              final_version_id: finalVersionId,
+            },
+            director_review: review,
+            fix_actions: fixActions,
+            final_evaluation: finalEvaluation,
+            blocked_review: {
+              status: savedBlock.status,
+              reason: savedBlock.review_block_reason,
+              meta: savedBlock.review_block_meta,
+            },
+          };
+        }
+
         if (finalEvaluation.overall_score >= DIRECTOR_LOOP_POLICY.pass_threshold) {
           break;
         }
       }
+    }
+
+    if (review.fix_plan && finalEvaluation.overall_score < DIRECTOR_LOOP_POLICY.pass_threshold) {
+      const blocked = buildFixExhaustionBlock({
+        rounds: DIRECTOR_LOOP_POLICY.max_auto_fix_rounds,
+        passThreshold: DIRECTOR_LOOP_POLICY.pass_threshold,
+        overallScore: finalEvaluation.overall_score,
+        summary: finalEvaluation.summary,
+        diagnostics: finalEvaluation.diagnostics,
+      });
+      const blockedReview = await this.chaptersService.blockChapterReview({
+        chapterId: chapter.id,
+        reason: blocked.reason,
+        source: blocked.source,
+        details: blocked.details,
+        versionId: finalVersionId,
+      });
+      return {
+        run_id: runId,
+        chapter_id: chapterId,
+        stage_versions: {
+          beats_version_id: (beatsResult.version as { id: string }).id,
+          draft_version_id: (draftResult.version as { id: string }).id,
+          polish_version_id: polishVersionId,
+          final_version_id: finalVersionId,
+        },
+        director_review: review,
+        fix_actions: fixActions,
+        final_evaluation: finalEvaluation,
+        blocked_review: {
+          status: blockedReview.status,
+          reason: blockedReview.review_block_reason,
+          meta: blockedReview.review_block_meta,
+        },
+      };
     }
 
     await this.versionEngine.tagBestVersion(chapterId, finalVersionId);

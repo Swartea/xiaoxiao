@@ -1,6 +1,6 @@
 import { Inject, Injectable } from "@nestjs/common";
 import { ExtractedStatus, Prisma } from "@prisma/client";
-import { normalizedContentHash } from "@novel-factory/memory";
+import { normalizedContentHash, sanitizeExtractedFacts } from "@novel-factory/memory";
 import { PrismaService } from "../../prisma.service";
 
 function toJson(value: unknown): Prisma.NullableJsonNullValueInput | Prisma.InputJsonValue {
@@ -21,11 +21,13 @@ export class MemoryEngine {
       .filter((line) => line.length >= 12)
       .slice(0, 8);
 
-    return sentences.map((content, idx) => ({
-      content,
-      confidence: Math.max(60, 90 - idx * 4),
-      source_span: { from: Math.max(0, idx * 30), to: Math.max(0, idx * 30 + content.length) },
-    }));
+    return sanitizeExtractedFacts(
+      sentences.map((content, idx) => ({
+        content,
+        confidence: Math.max(60, 90 - idx * 4),
+        source_span: { from: Math.max(0, idx * 30), to: Math.max(0, idx * 30 + content.length) },
+      })),
+    );
   }
 
   extractSeeds(text: string) {

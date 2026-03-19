@@ -1,6 +1,6 @@
-import { Body, Controller, Get, Inject, Param, Post, Query } from "@nestjs/common";
+import { Body, Controller, Get, Inject, Param, Patch, Post, Query } from "@nestjs/common";
 import { ChaptersService } from "./chapters.service";
-import { CreateChapterDto, RollbackChapterDto } from "./dto";
+import { CreateChapterDto, ImportChaptersDto, RollbackChapterDto, UpdateChapterReviewBlockDto } from "./dto";
 
 @Controller()
 export class ChaptersController {
@@ -14,6 +14,11 @@ export class ChaptersController {
   @Post("projects/:projectId/chapters/second-template")
   createSecondTemplate(@Param("projectId") projectId: string) {
     return this.chaptersService.createSecondChapterTemplate(projectId);
+  }
+
+  @Post("projects/:projectId/chapters/import")
+  importChapters(@Param("projectId") projectId: string, @Body() dto: ImportChaptersDto) {
+    return this.chaptersService.importChapters(projectId, dto);
   }
 
   @Get("projects/:projectId/chapters")
@@ -48,5 +53,10 @@ export class ChaptersController {
   @Post("chapters/:chapterId/rollback")
   rollback(@Param("chapterId") chapterId: string, @Body() dto: RollbackChapterDto) {
     return this.chaptersService.rollback(chapterId, dto);
+  }
+
+  @Patch("chapters/:chapterId/review-block")
+  updateReviewBlock(@Param("chapterId") chapterId: string, @Body() dto: UpdateChapterReviewBlockDto) {
+    return this.chaptersService.updateReviewBlock(chapterId, dto);
   }
 }

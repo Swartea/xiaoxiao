@@ -26,6 +26,13 @@ import { StylePresetRegistry } from "./engines/style-preset.registry";
 import { ContextEngine } from "./engines/context.engine";
 import { ChapterPipelineOrchestrator } from "./orchestrator/chapter-pipeline.orchestrator";
 import { RunTraceEngine } from "./engines/run-trace.engine";
+import { ChaptersService } from "../chapters/chapters.service";
+import {
+  buildFixExhaustionBlock,
+  buildQualityFailBlock,
+  detectSevereEvaluationContinuity,
+} from "../chapters/review-block";
+import { DIRECTOR_LOOP_POLICY } from "./orchestrator/director-loop.policy";
 
 @Injectable()
 export class StoryosService implements OnModuleInit {
@@ -46,6 +53,7 @@ export class StoryosService implements OnModuleInit {
     @Inject(ContextEngine) private readonly contextEngine: ContextEngine,
     @Inject(ChapterPipelineOrchestrator) private readonly orchestrator: ChapterPipelineOrchestrator,
     @Inject(RunTraceEngine) private readonly runTraceEngine: RunTraceEngine,
+    @Inject(ChaptersService) private readonly chaptersService: ChaptersService,
   ) {}
 
   async onModuleInit() {
@@ -59,6 +67,29 @@ export class StoryosService implements OnModuleInit {
       throw new NotFoundException("Chapter not found");
     }
     return chapter;
+  }
+
+  private async maybeBlockForEvaluation(args: {
+    chapterId: string;
+    versionId: string;
+    evaluation: Awaited<ReturnType<QualityEngine["evaluateChapter"]>>["evaluation"];
+    reportId?: string;
+    directorReviewId?: string;
+  }) {
+    const blocked = detectSevereEvaluationContinuity(args.evaluation);
+    if (!blocked) {
+      return null;
+    }
+
+    return this.chaptersService.blockChapterReview({
+      chapterId: args.chapterId,
+      reason: blocked.reason,
+      source: blocked.source,
+      details: blocked.details,
+      versionId: args.versionId,
+      reportId: args.reportId ?? null,
+      directorReviewId: args.directorReviewId ?? null,
+    });
   }
 
   async createBlueprint(projectId: string, dto: CreateBlueprintDto) {
@@ -131,11 +162,30 @@ export class StoryosService implements OnModuleInit {
       output_payload: evaluated.evaluation as unknown as Record<string, unknown>,
     });
 
-    return evaluated;
+    const blockedReview = await this.maybeBlockForEvaluation({
+      chapterId: chapter.id,
+      versionId: evaluated.version_id,
+      evaluation: evaluated.evaluation,
+      reportId: evaluated.continuity_report_id,
+    });
+
+    return {
+      ...evaluated,
+      blocked_review: blockedReview
+        ? {
+            status: blockedReview.status,
+            reason: blockedReview.review_block_reason,
+            meta: blockedReview.review_block_meta,
+          }
+        : null,
+    };
   }
 
   async reviewChapterByDirector(chapterId: string, dto: DirectorReviewDto) {
     const chapter = await this.resolveChapter(chapterId);
+    if (dto.auto_fix === true) {
+      this.chaptersService.assertAutomationAllowed(chapter, "总编闭环");
+    }
     const evaluated = await this.qualityEngine.evaluateChapter({
       chapterId,
       versionId: dto.version_id,
@@ -150,14 +200,121 @@ export class StoryosService implements OnModuleInit {
       review,
     });
 
+    const continuityBlock = await this.maybeBlockForEvaluation({
+      chapterId: chapter.id,
+      versionId: evaluated.version_id,
+      evaluation: evaluated.evaluation,
+      reportId: evaluated.continuity_report_id,
+      directorReviewId: saved.id,
+    });
+
     let fixResult: unknown = null;
     const shouldAutoFix = dto.auto_fix === true;
-    if (shouldAutoFix && !review.should_regenerate && review.fix_plan) {
-      try {
-        fixResult = await this.fixAgent.apply(chapterId, review.fix_plan, evaluated.version_id);
-      } catch (error) {
+    let finalVersionId = evaluated.version_id;
+    let finalEvaluation = evaluated.evaluation;
+
+    if (shouldAutoFix && !continuityBlock && review.should_regenerate) {
+      const blocked = buildQualityFailBlock({
+        summary: review.summary ?? evaluated.evaluation.summary,
+        diagnostics: evaluated.evaluation.diagnostics,
+      });
+      const blockedReview = await this.chaptersService.blockChapterReview({
+        chapterId: chapter.id,
+        reason: blocked.reason,
+        source: blocked.source,
+        details: blocked.details,
+        versionId: evaluated.version_id,
+        reportId: evaluated.continuity_report_id ?? null,
+        directorReviewId: saved.id,
+      });
+      fixResult = {
+        blocked_review: {
+          status: blockedReview.status,
+          reason: blockedReview.review_block_reason,
+          meta: blockedReview.review_block_meta,
+        },
+      };
+    } else if (shouldAutoFix && !review.should_regenerate && review.fix_plan && !continuityBlock) {
+      const appliedRounds: Array<{ task_id: string; new_version_id: string }> = [];
+      for (let round = 0; round < DIRECTOR_LOOP_POLICY.max_auto_fix_rounds; round += 1) {
+        try {
+          const applied = await this.fixAgent.apply(chapterId, review.fix_plan, finalVersionId);
+          appliedRounds.push({
+            task_id: applied.task_id,
+            new_version_id: applied.fix_result.new_version_id,
+          });
+          finalVersionId = applied.fix_result.new_version_id;
+          const reevaluated = await this.qualityEngine.evaluateChapter({
+            chapterId,
+            versionId: finalVersionId,
+            stylePresetName: dto.style_preset,
+            persist: true,
+          });
+          finalEvaluation = reevaluated.evaluation;
+
+          const blockedReview = await this.maybeBlockForEvaluation({
+            chapterId: chapter.id,
+            versionId: finalVersionId,
+            evaluation: finalEvaluation,
+            reportId: reevaluated.continuity_report_id,
+            directorReviewId: saved.id,
+          });
+          if (blockedReview) {
+            fixResult = {
+              applied_rounds: appliedRounds,
+              blocked_review: {
+                status: blockedReview.status,
+                reason: blockedReview.review_block_reason,
+                meta: blockedReview.review_block_meta,
+              },
+            };
+            break;
+          }
+
+          if (finalEvaluation.overall_score >= DIRECTOR_LOOP_POLICY.pass_threshold) {
+            fixResult = {
+              applied_rounds: appliedRounds,
+              final_version_id: finalVersionId,
+              final_evaluation: finalEvaluation,
+            };
+            break;
+          }
+        } catch (error) {
+          fixResult = {
+            error: error instanceof Error ? error.message : "auto fix failed",
+          };
+          break;
+        }
+      }
+
+      if (
+        !fixResult ||
+        (!("blocked_review" in (fixResult as Record<string, unknown>)) &&
+          finalEvaluation.overall_score < DIRECTOR_LOOP_POLICY.pass_threshold)
+      ) {
+        const blocked = buildFixExhaustionBlock({
+          rounds: DIRECTOR_LOOP_POLICY.max_auto_fix_rounds,
+          passThreshold: DIRECTOR_LOOP_POLICY.pass_threshold,
+          overallScore: finalEvaluation.overall_score,
+          summary: finalEvaluation.summary,
+          diagnostics: finalEvaluation.diagnostics,
+        });
+        const blockedReview = await this.chaptersService.blockChapterReview({
+          chapterId: chapter.id,
+          reason: blocked.reason,
+          source: blocked.source,
+          details: blocked.details,
+          versionId: finalVersionId,
+          directorReviewId: saved.id,
+        });
+        const priorFixResult = fixResult as { applied_rounds?: Array<{ task_id: string; new_version_id: string }> } | null;
         fixResult = {
-          error: error instanceof Error ? error.message : "auto fix failed",
+          applied_rounds: Array.isArray(priorFixResult?.applied_rounds) ? priorFixResult.applied_rounds : [],
+          blocked_review: {
+            status: blockedReview.status,
+            reason: blockedReview.review_block_reason,
+            meta: blockedReview.review_block_meta,
+          },
         };
       }
     }
@@ -180,12 +337,20 @@ export class StoryosService implements OnModuleInit {
     });
 
     return {
-      version_id: evaluated.version_id,
-      evaluation: evaluated.evaluation,
+      version_id: finalVersionId,
+      evaluation: finalEvaluation,
       director_review: review,
       director_review_id: saved.id,
       auto_fix_enabled: shouldAutoFix,
       auto_fix: fixResult,
+      blocked_review:
+        continuityBlock && !fixResult
+          ? {
+              status: continuityBlock.status,
+              reason: continuityBlock.review_block_reason,
+              meta: continuityBlock.review_block_meta,
+            }
+          : (fixResult as Record<string, unknown> | null)?.blocked_review ?? null,
     };
   }
 

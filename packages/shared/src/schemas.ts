@@ -90,6 +90,8 @@ export type RetrieverMeta = z.infer<typeof retrieverMetaSchema>;
 
 export const fixModeSchema = z.enum(["replace_span", "rewrite_section", "rewrite_chapter"]);
 export type FixMode = z.infer<typeof fixModeSchema>;
+export const fixIntensitySchema = z.enum(["low", "medium", "high"]);
+export type FixIntensity = z.infer<typeof fixIntensitySchema>;
 
 export const fixRequestSchema = z
   .object({
@@ -109,6 +111,10 @@ export const fixRequestSchema = z
     issue_ids: z.array(z.string()).optional(),
     strategy_id: z.string().optional(),
     instruction: z.string().optional(),
+    fix_goal: z.string().optional(),
+    keep_elements: z.array(z.string()).optional(),
+    forbidden_changes: z.array(z.string()).optional(),
+    target_intensity: fixIntensitySchema.optional(),
   })
   .superRefine((value, ctx) => {
     if (value.mode === "replace_span" && !value.span) {

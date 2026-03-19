@@ -22,4 +22,30 @@ describe("runContinuityCheck", () => {
     expect(report.summary.high).toBeGreaterThanOrEqual(1);
     expect(report.issues.some((i) => i.type === "knowledge_time_travel")).toBe(true);
   });
+
+  it("reports inventory regression when a lost item is used again", () => {
+    const report = runContinuityCheck({
+      versionId: "7f6c68cb-b807-4f96-b496-7564288f1f35",
+      textHash: "def",
+      chapterNo: 6,
+      text: "陈安拔出佩剑，横在身前。",
+      glossary: [],
+      characters: [
+        {
+          id: "c1",
+          name: "陈安",
+          age: 18,
+          abilities: null,
+          current_status: "受伤",
+          state_snapshot: {
+            current_status: "受伤",
+            items_missing: ["佩剑"],
+          },
+        },
+      ],
+      facts: [],
+    });
+
+    expect(report.issues.some((i) => i.type === "inventory_regression")).toBe(true);
+  });
 });

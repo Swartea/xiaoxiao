@@ -22,6 +22,29 @@ export class FixEngine {
   routeFixStrategy(evaluation: ChapterEvaluation) {
     const { quality, continuity } = evaluation;
 
+    if (
+      continuity.world_rule_conflict.length > 0 ||
+      continuity.timeline_conflict.length > 0 ||
+      continuity.relationship_conflict.length > 0 ||
+      continuity.character_ooc.length > 0
+    ) {
+      return this.fixContinuity();
+    }
+
+    const topDiagnostic = [...(evaluation.diagnostics ?? [])].sort((left, right) => left.score - right.score)[0];
+    if (topDiagnostic?.issue_type === "ai_tone") {
+      return this.fixAiTone(topDiagnostic);
+    }
+    if (topDiagnostic?.issue_type === "exposition_overload") {
+      return this.fixExposition(topDiagnostic);
+    }
+    if (topDiagnostic?.issue_type === "weak_scene") {
+      return this.fixWeakScene(topDiagnostic);
+    }
+    if (topDiagnostic?.issue_type === "stiff_dialogue") {
+      return this.fixStiffDialogue(topDiagnostic);
+    }
+
     if (quality.opening_hook.score < 6) {
       return this.fixOpening();
     }
@@ -38,15 +61,6 @@ export class FixEngine {
       return this.fixPacing();
     }
 
-    if (
-      continuity.world_rule_conflict.length > 0 ||
-      continuity.timeline_conflict.length > 0 ||
-      continuity.relationship_conflict.length > 0 ||
-      continuity.character_ooc.length > 0
-    ) {
-      return this.fixContinuity();
-    }
-
     return null;
   }
 
@@ -57,6 +71,8 @@ export class FixEngine {
       keep_elements: ["主线冲突", "角色关系", "关键数字"],
       forbidden_changes: ["改变时间线", "改写章节结局"],
       target_intensity: "medium",
+      rewrite_tactics: ["删掉开头解释句", "先抛异常动作或威胁", "把最必要信息后置"],
+      focus_span: { from: 0, to: 320 },
     });
   }
 
@@ -67,6 +83,7 @@ export class FixEngine {
       keep_elements: ["结尾前事件顺序", "伏笔关系"],
       forbidden_changes: ["新增世界观设定", "软收"],
       target_intensity: "medium",
+      rewrite_tactics: ["压缩结尾总结句", "保留未兑现代价", "最后一句只揭示一半信息"],
     });
   }
 
@@ -77,6 +94,7 @@ export class FixEngine {
       keep_elements: ["场景目标", "冲突结果"],
       forbidden_changes: ["删除关键事实", "全员统一口吻"],
       target_intensity: "medium",
+      rewrite_tactics: ["删掉解释性对白", "加入打断与反问", "对白里保留试探和遮掩"],
     });
   }
 
@@ -87,6 +105,7 @@ export class FixEngine {
       keep_elements: ["剧情主干", "角色弧线"],
       forbidden_changes: ["新增支线", "删掉关键伏笔"],
       target_intensity: "high",
+      rewrite_tactics: ["拆短说明段", "动作段与信息段错位排布", "减少平均句长"],
     });
   }
 
@@ -97,6 +116,76 @@ export class FixEngine {
       keep_elements: ["既有剧情推进"],
       forbidden_changes: ["无关改写", "删除主线冲突"],
       target_intensity: "low",
+      rewrite_tactics: ["只修冲突事实", "不扩散到无关段落"],
+    });
+  }
+
+  fixAiTone(diagnostic?: ChapterEvaluation["diagnostics"][number]): FixPlan {
+    return fixPlanSchema.parse({
+      issue_type: "ai_tone",
+      fix_goal: "局部去除套话、对称句和机械心理标签，保持剧情事实不变",
+      keep_elements: ["剧情推进", "角色关系", "关键事实"],
+      forbidden_changes: ["扩写新设定", "整章推翻重写"],
+      target_intensity: diagnostic?.severity === "high" ? "medium" : "low",
+      rewrite_tactics: diagnostic?.suggested_actions ?? [
+        "砍掉连续定语链，把修饰拆回动作和结果",
+        "打破连续对称句式",
+        "将情绪总结改写为肢体动作或环境反应",
+        "删除显式心理标签",
+      ],
+      focus_span: diagnostic?.focus_span,
+      focus_scene_index: diagnostic?.focus_scene_index,
+    });
+  }
+
+  fixExposition(diagnostic?: ChapterEvaluation["diagnostics"][number]): FixPlan {
+    return fixPlanSchema.parse({
+      issue_type: "exposition_overload",
+      fix_goal: "压缩说明性段落，把信息拆回动作和对白",
+      keep_elements: ["核心信息点", "因果顺序"],
+      forbidden_changes: ["删除必要设定", "改动事实结论"],
+      target_intensity: diagnostic?.severity === "high" ? "medium" : "low",
+      rewrite_tactics: diagnostic?.suggested_actions ?? [
+        "删除段首段尾硬总结",
+        "把解释句拆成动作与对白",
+        "保留当下场景必须信息",
+      ],
+      focus_span: diagnostic?.focus_span,
+      focus_scene_index: diagnostic?.focus_scene_index,
+    });
+  }
+
+  fixWeakScene(diagnostic?: ChapterEvaluation["diagnostics"][number]): FixPlan {
+    return fixPlanSchema.parse({
+      issue_type: "weak_scene",
+      fix_goal: "增强场景画面感和可感知细节，不改变剧情走向",
+      keep_elements: ["场景目标", "冲突结果", "关键伏笔"],
+      forbidden_changes: ["新增支线", "改变角色立场"],
+      target_intensity: diagnostic?.severity === "high" ? "medium" : "low",
+      rewrite_tactics: diagnostic?.suggested_actions ?? [
+        "增加视觉/听觉/触觉细节",
+        "补一个环境反馈",
+        "用动作承载情绪变化",
+      ],
+      focus_span: diagnostic?.focus_span,
+      focus_scene_index: diagnostic?.focus_scene_index,
+    });
+  }
+
+  fixStiffDialogue(diagnostic?: ChapterEvaluation["diagnostics"][number]): FixPlan {
+    return fixPlanSchema.parse({
+      issue_type: "stiff_dialogue",
+      fix_goal: "把书面化对白改成更自然的试探、打断和留白",
+      keep_elements: ["对白信息目标", "角色关系张力"],
+      forbidden_changes: ["删掉关键信息", "统一人物口吻"],
+      target_intensity: diagnostic?.severity === "high" ? "medium" : "low",
+      rewrite_tactics: diagnostic?.suggested_actions ?? [
+        "打断过长说明句",
+        "加入反问、停顿和未说完的话",
+        "删掉替作者解释背景的对白",
+      ],
+      focus_span: diagnostic?.focus_span,
+      focus_scene_index: diagnostic?.focus_scene_index,
     });
   }
 
@@ -158,14 +247,47 @@ export class FixEngine {
     keepElements: string[];
     forbiddenChanges: string[];
     targetIntensity: string;
+    rewriteTactics?: string[];
+    focusSpan?: { from: number; to: number };
+    focusSceneIndex?: number;
   }) {
+    const instruction = [
+      args.fixGoal,
+      `保留：${args.keepElements.join("、")}`,
+      `禁止：${args.forbiddenChanges.join("、")}`,
+      `强度：${args.targetIntensity}`,
+      args.rewriteTactics && args.rewriteTactics.length > 0 ? `手术策略：${args.rewriteTactics.join("；")}` : "",
+    ]
+      .filter(Boolean)
+      .join("；");
+
+    if (args.focusSpan) {
+      return {
+        base_version_id: args.baseVersionId,
+        mode: "replace_span" as const,
+        span: args.focusSpan,
+        strategy_id: `${args.issueType}-targeted-rewrite`,
+        instruction,
+      };
+    }
+
+    if (typeof args.focusSceneIndex === "number") {
+      return {
+        base_version_id: args.baseVersionId,
+        mode: "rewrite_section" as const,
+        section: { scene_index: args.focusSceneIndex },
+        strategy_id: `${args.issueType}-scene-rewrite`,
+        instruction,
+      };
+    }
+
     if (args.issueType === "opening_hook") {
       return {
         base_version_id: args.baseVersionId,
         mode: "replace_span" as const,
         span: { from: 0, to: Math.min(320, args.baseText.length) },
         strategy_id: "opening-hook-upgrade",
-        instruction: `${args.fixGoal}；保留：${args.keepElements.join("、")}；禁止：${args.forbiddenChanges.join("、")}；强度：${args.targetIntensity}`,
+        instruction,
       };
     }
 
@@ -176,17 +298,27 @@ export class FixEngine {
         mode: "replace_span" as const,
         span: { from, to: args.baseText.length },
         strategy_id: "ending-hook-upgrade",
-        instruction: `${args.fixGoal}；保留：${args.keepElements.join("、")}；禁止：${args.forbiddenChanges.join("、")}；强度：${args.targetIntensity}`,
+        instruction,
       };
     }
 
-    if (args.issueType === "dialogue_quality") {
+    if (args.issueType === "dialogue_quality" || args.issueType === "stiff_dialogue" || args.issueType === "weak_scene") {
       return {
         base_version_id: args.baseVersionId,
         mode: "rewrite_section" as const,
         section: { scene_index: 0 },
-        strategy_id: "dialogue-quality-upgrade",
-        instruction: `${args.fixGoal}；保留：${args.keepElements.join("、")}；禁止：${args.forbiddenChanges.join("、")}；强度：${args.targetIntensity}`,
+        strategy_id: `${args.issueType}-upgrade`,
+        instruction,
+      };
+    }
+
+    if (args.issueType === "ai_tone" || args.issueType === "exposition_overload") {
+      return {
+        base_version_id: args.baseVersionId,
+        mode: "rewrite_section" as const,
+        section: { scene_index: 0 },
+        strategy_id: `${args.issueType}-surgery`,
+        instruction,
       };
     }
 
@@ -195,7 +327,7 @@ export class FixEngine {
         base_version_id: args.baseVersionId,
         mode: "rewrite_chapter" as const,
         strategy_id: "pacing-rewrite",
-        instruction: `${args.fixGoal}；保留：${args.keepElements.join("、")}；禁止：${args.forbiddenChanges.join("、")}；强度：${args.targetIntensity}`,
+        instruction,
       };
     }
 
@@ -203,7 +335,7 @@ export class FixEngine {
       base_version_id: args.baseVersionId,
       mode: "rewrite_chapter" as const,
       strategy_id: "continuity-fix",
-      instruction: `${args.fixGoal}；保留：${args.keepElements.join("、")}；禁止：${args.forbiddenChanges.join("、")}；强度：${args.targetIntensity}`,
+      instruction,
     };
   }
 
@@ -238,6 +370,9 @@ export class FixEngine {
       keepElements: args.plan.keep_elements,
       forbiddenChanges: args.plan.forbidden_changes,
       targetIntensity: args.plan.target_intensity,
+      rewriteTactics: args.plan.rewrite_tactics,
+      focusSpan: args.plan.focus_span,
+      focusSceneIndex: args.plan.focus_scene_index,
     });
 
     try {

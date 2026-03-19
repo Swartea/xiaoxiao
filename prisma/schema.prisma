@@ -21,6 +21,7 @@ enum ChapterStatus {
   outline
   draft
   final
+  blocked_review
 }
 
 enum VersionStage {
@@ -58,6 +59,7 @@ enum ExtractedStatus {
   extracted
   confirmed
   rejected
+  superseded
 }
 
 enum GenerationRequestStatus {
@@ -267,6 +269,8 @@ model Chapter {
   cliffhanger String?
   word_target Int?
   status      ChapterStatus @default(outline)
+  review_block_reason String?
+  review_block_meta   Json?
   created_at  DateTime      @default(now())
   updated_at  DateTime      @updatedAt
 

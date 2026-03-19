@@ -15,7 +15,7 @@ export class WorkspaceService {
       throw new NotFoundException("Chapter not found");
     }
 
-    const [latestVersion, versions, latestSnapshot, latestReport, latestMemory, latestQuality, qualityTrend, latestDirector, recentFixTasks, latestStoryContext] = await Promise.all([
+    const [latestVersion, versions, latestSnapshot, latestReport, latestMemory, latestQuality, qualityTrend, latestDirector, recentFixTasks, latestStoryContext, latestIntent] = await Promise.all([
       this.prisma.chapterVersion.findFirst({
         where: { chapter_id: chapterId },
         orderBy: { version_no: "desc" },
@@ -70,6 +70,10 @@ export class WorkspaceService {
         where: { chapter_id: chapterId },
         orderBy: { created_at: "desc" },
       }),
+      this.prisma.chapterIntent.findFirst({
+        where: { chapter_id: chapterId },
+        orderBy: { version_no: "desc" },
+      }),
     ]);
 
     const sourceVersionId = latestVersion?.id;
@@ -91,6 +95,14 @@ export class WorkspaceService {
 
     return {
       chapter,
+      review_block:
+        chapter.status === "blocked_review"
+          ? {
+              status: chapter.status,
+              reason: chapter.review_block_reason,
+              meta: chapter.review_block_meta,
+            }
+          : null,
       latest_version: latestVersion,
       versions,
       generation_context_snapshot: latestSnapshot,
@@ -104,6 +116,7 @@ export class WorkspaceService {
         .reverse()
         .map((item) => ({ version_id: item.version_id, overall_score: item.overall_score })),
       chapter_memory: latestMemory,
+      latest_intent: latestIntent,
       extracted_items: {
         facts,
         seeds,

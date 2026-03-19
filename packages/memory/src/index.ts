@@ -3,5 +3,8 @@ export * from "./hash";
 export * from "./retriever";
 export * from "./assembler";
 export * from "./extractor";
+export * from "./fact-sanitizer";
 export * from "./checker";
+export * from "./lifecycle";
+export * from "./snapshot";
 export * from "./prompt";

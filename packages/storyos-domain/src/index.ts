@@ -2,6 +2,20 @@ import { z } from "zod";
 
 export const stylePresetNameSchema = z.enum(["webnovel", "toutiao-fiction", "short-drama"]);
 
+export const sentenceRhythmSchema = z.object({
+  allowShortSentence: z.boolean().optional(),
+  maxSentencesPerParagraph: z.number().int().positive().optional(),
+  alternatingBias: z.enum(["low", "medium", "high"]).optional(),
+  explanatorySentenceTolerance: z.number().int().min(0).optional(),
+});
+
+export const showDontTellBiasSchema = z.object({
+  sensoryDetail: z.enum(["low", "medium", "high"]).optional(),
+  actionDetail: z.enum(["low", "medium", "high"]).optional(),
+  directEmotionTolerance: z.enum(["low", "medium", "high"]).optional(),
+  themeStatementTolerance: z.enum(["low", "medium", "high"]).optional(),
+});
+
 export const stylePresetSchema = z.object({
   targetPlatform: z.string(),
   sentenceLength: z.enum(["short", "medium"]),
@@ -13,6 +27,9 @@ export const stylePresetSchema = z.object({
   tabooRules: z.array(z.string()),
   favoredDevices: z.array(z.string()),
   pacingProfile: z.enum(["fast", "balanced", "slow-burn"]),
+  bannedWords: z.array(z.string()).optional(),
+  sentenceRhythm: sentenceRhythmSchema.optional(),
+  showDontTellBias: showDontTellBiasSchema.optional(),
 });
 export type StylePresetSpec = z.infer<typeof stylePresetSchema>;
 
@@ -51,14 +68,43 @@ export const qualityDimensionSchema = z.object({
   reason: z.string(),
 });
 
+export const qualityIssueTypeSchema = z.enum([
+  "ai_tone",
+  "exposition_overload",
+  "weak_scene",
+  "stiff_dialogue",
+  "opening_hook",
+  "ending_hook",
+  "pacing",
+  "continuity",
+]);
+
+export const qualityDiagnosticSchema = z.object({
+  issue_type: qualityIssueTypeSchema,
+  severity: z.enum(["low", "medium", "high"]),
+  score: z.number().min(0).max(10),
+  reason: z.string(),
+  evidence: z.array(z.string()).default([]),
+  suggested_actions: z.array(z.string()).default([]),
+  focus_span: z
+    .object({
+      from: z.number().int().min(0),
+      to: z.number().int().min(0),
+    })
+    .optional(),
+  focus_scene_index: z.number().int().min(0).optional(),
+});
+
 export const chapterQualitySchema = z.object({
   opening_hook: qualityDimensionSchema,
   conflict_strength: qualityDimensionSchema,
   pacing: qualityDimensionSchema,
   dialogue_quality: qualityDimensionSchema,
+  dialogue_naturalness: qualityDimensionSchema,
   character_voice: qualityDimensionSchema,
   scene_vividness: qualityDimensionSchema,
   exposition_control: qualityDimensionSchema,
+  ai_tone_risk: qualityDimensionSchema,
   ending_hook: qualityDimensionSchema,
   platform_fit: qualityDimensionSchema,
 });
@@ -75,6 +121,7 @@ export const chapterEvaluationSchema = z.object({
   overall_score: z.number().min(0).max(10),
   quality: chapterQualitySchema,
   continuity: continuityItemsSchema,
+  diagnostics: z.array(qualityDiagnosticSchema).default([]),
   summary: z.string(),
 });
 export type ChapterEvaluation = z.infer<typeof chapterEvaluationSchema>;
@@ -87,6 +134,14 @@ export const fixPlanSchema = z.object({
   keep_elements: z.array(z.string()),
   forbidden_changes: z.array(z.string()),
   target_intensity: fixIntensitySchema,
+  rewrite_tactics: z.array(z.string()).optional(),
+  focus_span: z
+    .object({
+      from: z.number().int().min(0),
+      to: z.number().int().min(0),
+    })
+    .optional(),
+  focus_scene_index: z.number().int().min(0).optional(),
 });
 export type FixPlan = z.infer<typeof fixPlanSchema>;
 

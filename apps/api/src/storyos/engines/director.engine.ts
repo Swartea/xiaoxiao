@@ -27,6 +27,10 @@ export class DirectorEngine {
       return true;
     }
 
+    if (evaluation.quality.ai_tone_risk.score < 3.5 && evaluation.quality.scene_vividness.score < 4.5) {
+      return true;
+    }
+
     return false;
   }
 
@@ -61,6 +65,13 @@ export class DirectorEngine {
     if (evaluation.continuity.seed_payoff_miss.length > 0) {
       return "部分伏笔应提前兑现，避免长期悬置";
     }
+    const weakestDiagnostic = [...(evaluation.diagnostics ?? [])].sort((left, right) => left.score - right.score)[0];
+    if (weakestDiagnostic?.issue_type === "exposition_overload") {
+      return "当前章解释偏多，下一章继续推进时应把信息转回场景和对白。";
+    }
+    if (weakestDiagnostic?.issue_type === "weak_scene") {
+      return "当前章画面支撑偏弱，后续章节应优先用环境反馈和动作承接冲突。";
+    }
     return "弧线推进正常";
   }
 
@@ -78,6 +89,9 @@ export class DirectorEngine {
         ? "accept"
         : "fix";
 
+    const weakestDiagnostic = [...(args.evaluation.diagnostics ?? [])].sort((left, right) => left.score - right.score)[0];
+    const focusText = weakestDiagnostic ? `当前首要问题是 ${weakestDiagnostic.issue_type}。` : "";
+
     return {
       decision,
       should_regenerate: regenerate,
@@ -89,8 +103,8 @@ export class DirectorEngine {
         decision === "accept"
           ? "当前版本可发布，建议局部微调后进入下章。"
           : decision === "fix"
-            ? "建议先执行定向修复，再复评。"
-            : "建议重生成并强制提升冲突与钩子。",
+            ? `${focusText}建议先执行定向修复，再复评。`.trim()
+            : `${focusText}建议重生成并强制提升冲突与钩子。`.trim(),
     };
   }
 

@@ -17,8 +17,15 @@ describe("fixRequestSchema", () => {
       mode: "rewrite_section",
       section: { scene_index: 1 },
       strategy_id: "strategy-1",
+      fix_goal: "收紧冲突表达",
+      keep_elements: ["主线冲突", "关键数字"],
+      forbidden_changes: ["时间线", "人物关系"],
+      target_intensity: "medium",
     });
 
     expect(parsed.mode).toBe("rewrite_section");
+    expect(parsed.fix_goal).toBe("收紧冲突表达");
+    expect(parsed.keep_elements).toEqual(["主线冲突", "关键数字"]);
+    expect(parsed.target_intensity).toBe("medium");
   });
 });

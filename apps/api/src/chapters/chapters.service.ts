@@ -1,9 +1,18 @@
-import { BadRequestException, Inject, Injectable, NotFoundException } from "@nestjs/common";
+import { BadRequestException, ConflictException, Inject, Injectable, NotFoundException } from "@nestjs/common";
 import { diffLines } from "diff";
 import { createHash } from "node:crypto";
-import { Prisma, VersionStage } from "@prisma/client";
+import { ChapterStatus, Prisma, VersionStage } from "@prisma/client";
 import { PrismaService } from "../prisma.service";
-import { CreateChapterDto, RollbackChapterDto } from "./dto";
+import { CreateChapterDto, ImportChaptersDto, RollbackChapterDto, UpdateChapterReviewBlockDto } from "./dto";
+import { isBlockedReviewChapter, normalizeReviewBlockMeta, resolveReviewResumeStatus, type ReviewBlockSource } from "./review-block";
+import { DEFAULT_CHAPTER_WORD_TARGET } from "./chapter-length";
+
+type ImportedChapterInput = {
+  chapter_no?: number;
+  title?: string;
+  text: string;
+  stage?: VersionStage;
+};
 
 function textHash(text: string): string {
   return createHash("sha256").update(text).digest("hex");
@@ -47,9 +56,156 @@ function excerptText(value: string | null, maxLength = 120): string | null {
   return value.length > maxLength ? `${value.slice(0, maxLength)}...` : value;
 }
 
+function parseImportedChapterHeader(text: string) {
+  const normalized = text.replace(/^\uFEFF/, "").trim();
+  const lines = normalized.split(/\r?\n/);
+  const firstLine = lines[0]?.trim() ?? "";
+  const match = firstLine.match(/^第\s*(\d+)\s*章(?:\s*[·.、\-：:]\s*|\s+)?(.*)$/i);
+  if (!match) {
+    return {
+      chapterNo: null as number | null,
+      title: null as string | null,
+      body: normalized,
+    };
+  }
+
+  const chapterNo = Number.parseInt(match[1] ?? "", 10);
+  const title = (match[2] ?? "").trim() || null;
+  const body = lines.slice(1).join("\n").trim() || normalized;
+  return {
+    chapterNo: Number.isFinite(chapterNo) ? chapterNo : null,
+    title,
+    body,
+  };
+}
+
+function parseVersionStage(value: unknown): VersionStage | undefined {
+  if (typeof value !== "string") {
+    return undefined;
+  }
+  return Object.values(VersionStage).includes(value as VersionStage) ? (value as VersionStage) : undefined;
+}
+
+function parseRawImportText(rawText: string): ImportedChapterInput[] {
+  const normalized = rawText.replace(/\r\n/g, "\n").trim();
+  if (!normalized) {
+    return [];
+  }
+
+  try {
+    const parsed = JSON.parse(normalized);
+    if (Array.isArray(parsed)) {
+      return parsed
+        .filter((item) => item && typeof item === "object")
+        .map((item) => ({
+          chapter_no: typeof item.chapter_no === "number" ? item.chapter_no : undefined,
+          title: typeof item.title === "string" ? item.title : undefined,
+          text: typeof item.text === "string" ? item.text : "",
+          stage: parseVersionStage(item.stage),
+        }))
+        .filter((item) => item.text.trim().length > 0);
+    }
+  } catch {
+    // fall through to plaintext parser
+  }
+
+  const blocks = normalized
+    .split(/\n(?=第\s*\d+\s*章)/)
+    .map((block) => block.trim())
+    .filter(Boolean);
+
+  return blocks.map((block) => {
+    const parsed = parseImportedChapterHeader(block);
+    return {
+      chapter_no: parsed.chapterNo ?? undefined,
+      title: parsed.title ?? undefined,
+      text: parsed.body.trim() || block,
+    };
+  });
+}
+
 @Injectable()
 export class ChaptersService {
   constructor(@Inject(PrismaService) private readonly prisma: PrismaService) {}
+
+  async resolveChapterForMutation(chapterId: string) {
+    const chapter = await this.prisma.chapter.findUnique({ where: { id: chapterId } });
+    if (!chapter) {
+      throw new NotFoundException("Chapter not found");
+    }
+    return chapter;
+  }
+
+  assertAutomationAllowed(chapter: {
+    id: string;
+    status: ChapterStatus;
+    review_block_reason: string | null;
+    review_block_meta: Prisma.JsonValue | null;
+  }, actionLabel: string) {
+    if (!isBlockedReviewChapter(chapter)) {
+      return;
+    }
+
+    const meta = normalizeReviewBlockMeta(chapter.review_block_meta);
+    const reason = chapter.review_block_reason ?? "当前章节处于 blocked_review。";
+    const source = meta?.source ? `来源：${meta.source}` : "";
+    throw new ConflictException([reason, source, `请先人工处理并解除阻断，再执行${actionLabel}。`].filter(Boolean).join(" "));
+  }
+
+  async blockChapterReview(args: {
+    chapterId: string;
+    reason: string;
+    source: ReviewBlockSource;
+    details?: string[];
+    versionId?: string | null;
+    reportId?: string | null;
+    directorReviewId?: string | null;
+  }) {
+    const chapter = await this.resolveChapterForMutation(args.chapterId);
+    const currentMeta = normalizeReviewBlockMeta(chapter.review_block_meta);
+    const previousStatus =
+      chapter.status === ChapterStatus.blocked_review ? currentMeta?.previous_status ?? ChapterStatus.draft : chapter.status;
+
+    return this.prisma.chapter.update({
+      where: { id: chapter.id },
+      data: {
+        status: ChapterStatus.blocked_review,
+        review_block_reason: args.reason,
+        review_block_meta: {
+          source: args.source,
+          previous_status: previousStatus,
+          version_id: args.versionId ?? null,
+          report_id: args.reportId ?? null,
+          director_review_id: args.directorReviewId ?? null,
+          details: args.details ?? [],
+          blocked_at: new Date().toISOString(),
+        } as Prisma.InputJsonObject,
+      },
+    });
+  }
+
+  async updateReviewBlock(chapterId: string, dto: UpdateChapterReviewBlockDto) {
+    const chapter = await this.resolveChapterForMutation(chapterId);
+
+    if (dto.blocked) {
+      return this.blockChapterReview({
+        chapterId: chapter.id,
+        reason: dto.reason ?? "人工挂起，等待审查。",
+        source: dto.source ?? "manual",
+        details: dto.details ?? [],
+        versionId: dto.version_id ?? null,
+      });
+    }
+
+    return this.prisma.chapter.update({
+      where: { id: chapter.id },
+      data: {
+        status: resolveReviewResumeStatus(chapter.review_block_meta, ChapterStatus.draft),
+        review_block_reason: null,
+        review_block_meta: Prisma.JsonNull,
+      },
+    });
+  }
 
   async createChapter(projectId: string, dto: CreateChapterDto) {
     return this.prisma.chapter.create({
@@ -61,10 +217,134 @@ export class ChaptersService {
         conflict: dto.conflict,
         twist: dto.twist,
         cliffhanger: dto.cliffhanger,
-        word_target: dto.word_target ?? 4000,
+        word_target: dto.word_target ?? DEFAULT_CHAPTER_WORD_TARGET,
         status: dto.status,
       },
     });
+  }
+
+  async importChapters(projectId: string, dto: ImportChaptersDto) {
+    const project = await this.prisma.project.findUnique({ where: { id: projectId } });
+    if (!project) {
+      throw new NotFoundException("Project not found");
+    }
+
+    const inputEntries = [
+      ...(Array.isArray(dto.entries) ? dto.entries : []),
+      ...parseRawImportText(dto.raw_text ?? ""),
+    ];
+
+    const sanitizedEntries = inputEntries
+      .map((entry, index) => {
+        const parsed = parseImportedChapterHeader(entry.text);
+        const text = (parsed.body || entry.text || "").trim();
+        const chapterNo =
+          typeof entry.chapter_no === "number" && Number.isFinite(entry.chapter_no)
+            ? entry.chapter_no
+            : parsed.chapterNo ?? index + 1;
+        const title = (entry.title ?? parsed.title ?? "").trim() || undefined;
+        const stage = (entry.stage ?? dto.default_stage ?? "draft") as VersionStage;
+        return { chapter_no: chapterNo, title, text, stage };
+      })
+      .filter((entry) => entry.text.length > 0)
+      .sort((a, b) => a.chapter_no - b.chapter_no);
+
+    if (sanitizedEntries.length === 0) {
+      throw new BadRequestException("请提供要导入的章节文本");
+    }
+
+    const seen = new Set<string>();
+    const dedupedEntries = sanitizedEntries.filter((entry) => {
+      const key = `${entry.chapter_no}:${textHash(entry.text)}`;
+      if (seen.has(key)) {
+        return false;
+      }
+      seen.add(key);
+      return true;
+    });
+
+    const chapterNos = dedupedEntries.map((entry) => entry.chapter_no);
+    const existingChapters = await this.prisma.chapter.findMany({
+      where: { project_id: projectId, chapter_no: { in: chapterNos } },
+      include: {
+        versions: {
+          orderBy: { version_no: "desc" },
+          take: 1,
+        },
+      },
+    });
+    const existingByNo = new Map(existingChapters.map((chapter) => [chapter.chapter_no, chapter]));
+
+    const imported: Array<{ chapter_id: string; chapter_no: number; title?: string; version_id: string; skipped?: boolean }> = [];
+
+    await this.prisma.$transaction(async (tx) => {
+      for (const entry of dedupedEntries) {
+        const existing = existingByNo.get(entry.chapter_no);
+        const existingLatest = existing?.versions?.[0];
+        const nextVersionNo = existingLatest ? existingLatest.version_no + 1 : 1;
+        const currentTextHash = textHash(entry.text);
+
+        if (existing && existingLatest?.text_hash === currentTextHash) {
+          imported.push({
+            chapter_id: existing.id,
+            chapter_no: existing.chapter_no,
+            title: existing.title ?? entry.title,
+            version_id: existingLatest.id,
+            skipped: true,
+          });
+          continue;
+        }
+
+        const chapter = existing
+          ? await tx.chapter.update({
+              where: { id: existing.id },
+              data: {
+                title: existing.title ?? entry.title,
+                status: entry.stage === VersionStage.polish ? ChapterStatus.final : ChapterStatus.draft,
+              },
+            })
+          : await tx.chapter.create({
+              data: {
+                project_id: projectId,
+                chapter_no: entry.chapter_no,
+                title: entry.title,
+                goal: entry.title ? `延续“${entry.title}”章节目标并保持剧情一致` : undefined,
+                status: entry.stage === VersionStage.polish ? ChapterStatus.final : ChapterStatus.draft,
+                word_target: DEFAULT_CHAPTER_WORD_TARGET,
+              },
+            });
+
+        const version = await tx.chapterVersion.create({
+          data: {
+            chapter_id: chapter.id,
+            version_no: existing ? nextVersionNo : 1,
+            stage: entry.stage,
+            text: entry.text,
+            text_hash: currentTextHash,
+            parent_version_id: existingLatest?.id ?? null,
+            meta: {
+              source: "chapter_import",
+              imported_at: new Date().toISOString(),
+              imported_title: entry.title ?? null,
+            },
+          },
+        });
+
+        imported.push({
+          chapter_id: chapter.id,
+          chapter_no: chapter.chapter_no,
+          title: chapter.title ?? entry.title,
+          version_id: version.id,
+        });
+      }
+    });
+
+    return {
+      project_id: projectId,
+      imported_count: imported.filter((item) => !item.skipped).length,
+      skipped_count: imported.filter((item) => item.skipped).length,
+      chapters: imported.sort((a, b) => a.chapter_no - b.chapter_no),
+    };
   }
 
   async createSecondChapterTemplate(projectId: string) {
@@ -109,7 +389,7 @@ export class ChaptersService {
     const tailFallback = compactSummaryFromText((latestV1?.text ?? "").slice(-800), 180);
     const numericAnchors = extractNumericAnchors(latestV1?.text ?? "");
 
-    const title = targetOutlineNode?.title ? `第2章 ${targetOutlineNode.title}` : "第2章 承接推进";
+    const title = targetOutlineNode?.title ? targetOutlineNode.title : "承接推进";
     const goal = targetOutlineNode?.goal ?? "承接第一章结尾并推动新的行动目标";
     const conflict = targetOutlineNode?.conflict ?? "延续上一章冲突，并抬高代价";
     const templateText = [
@@ -146,7 +426,7 @@ export class ChaptersService {
             title,
             goal,
             conflict,
-            word_target: existingChapter2.word_target ?? chapter1.word_target ?? 4000,
+            word_target: existingChapter2.word_target ?? chapter1.word_target ?? DEFAULT_CHAPTER_WORD_TARGET,
           },
         });
 
@@ -197,7 +477,7 @@ export class ChaptersService {
           title,
           goal,
           conflict,
-          word_target: chapter1.word_target ?? 4000,
+          word_target: chapter1.word_target ?? DEFAULT_CHAPTER_WORD_TARGET,
           status: "outline",
         },
       });

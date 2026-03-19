@@ -25,5 +25,5 @@ export class CheckContinuityDto {
 
 export class UpdateExtractionStatusDto {
   @IsString()
-  status!: "extracted" | "confirmed" | "rejected";
+  status!: "extracted" | "confirmed" | "rejected" | "superseded";
 }

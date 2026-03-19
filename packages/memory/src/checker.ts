@@ -1,4 +1,5 @@
 import { continuityReportSchema, type ContinuityReport } from "@novel-factory/shared";
+import { normalizeCharacterStateSnapshot } from "./snapshot";
 import type { ContinuityCheckInput, ContinuityIssue } from "./types";
 
 function createIssue(
@@ -26,6 +27,66 @@ function summarizeSeverity(issues: ContinuityIssue[]) {
     if (issue.severity === "low") summary.low += 1;
   }
   return summary;
+}
+
+function includesAny(text: string, patterns: string[]) {
+  return patterns.some((pattern) => text.includes(pattern));
+}
+
+function inventoryConflictPhrases(item: string) {
+  return [
+    `握住${item}`,
+    `握紧${item}`,
+    `拔出${item}`,
+    `抽出${item}`,
+    `佩着${item}`,
+    `带着${item}`,
+    `背着${item}`,
+    `挥动${item}`,
+  ];
+}
+
+function inventoryRecoveredPhrases(item: string) {
+  return [
+    `夺回${item}`,
+    `取回${item}`,
+    `找回${item}`,
+    `捡回${item}`,
+    `重新拿起${item}`,
+    `重新握住${item}`,
+    `重新佩上${item}`,
+  ];
+}
+
+function conditionRegressionPhrases(condition: string) {
+  if (includesAny(condition, ["受伤", "重伤", "伤重", "虚弱"])) {
+    return ["毫发无伤", "若无其事", "全无异样", "健步如飞", "行动如常"];
+  }
+  if (condition.includes("中毒")) {
+    return ["全无毒发", "若无其事", "面色红润", "气息平稳"];
+  }
+  if (condition.includes("昏迷")) {
+    return ["清醒地", "立刻回答", "自如开口"];
+  }
+  return [];
+}
+
+function abilityRegressionPhrases(flag: string) {
+  if (flag.includes("无法") || flag.includes("不能")) {
+    const nouns = ["灵力", "功力", "真气", "术法", "能力"];
+    const target = nouns.find((noun) => flag.includes(noun));
+    if (target) {
+      return [`催动${target}`, `运转${target}`, `施展${target}`, `爆发${target}`];
+    }
+  }
+  if (flag.includes("功力尽失")) {
+    return ["催动功力", "运起真气", "内力鼓荡"];
+  }
+  return [];
+}
+
+function allegianceConflictPhrases(previous: string) {
+  return [`效忠${previous}`, `听命于${previous}`, `归属${previous}`, `仍为${previous}卖命`];
 }
 
 export function runContinuityCheck(input: ContinuityCheckInput): ContinuityReport {
@@ -99,6 +160,128 @@ export function runContinuityCheck(input: ContinuityCheckInput): ContinuityRepor
                 ...evidence,
               },
               suggested_fix: "替换为设定允许的能力表现，并补充代价",
+            },
+            issues.length,
+          ),
+        );
+      }
+    }
+
+    const snapshot = normalizeCharacterStateSnapshot(character.state_snapshot);
+    const mentionsCharacter = input.text.includes(character.name);
+    for (const item of snapshot.items_missing ?? []) {
+      if (
+        mentionsCharacter &&
+        includesAny(input.text, inventoryConflictPhrases(item)) &&
+        !includesAny(input.text, inventoryRecoveredPhrases(item))
+      ) {
+        const evidence = findEvidence(input.text, item);
+        issues.push(
+          createIssue(
+            {
+              type: "inventory_regression",
+              severity: "high",
+              message: `${character.name} 已失去 ${item}，正文却继续按持有状态描写`,
+              evidence: {
+                version_id: input.versionId,
+                text_hash: input.textHash,
+                ...evidence,
+              },
+              suggested_fix: `补写重新获得 ${item} 的过程，或改写当前动作描写`,
+            },
+            issues.length,
+          ),
+        );
+      }
+    }
+
+    for (const condition of snapshot.condition_flags ?? []) {
+      const phrases = conditionRegressionPhrases(condition);
+      const hit = phrases.find((phrase) => input.text.includes(phrase));
+      if (hit && mentionsCharacter) {
+        const evidence = findEvidence(input.text, hit);
+        issues.push(
+          createIssue(
+            {
+              type: "condition_regression",
+              severity: "med",
+              message: `${character.name} 当前状态为“${condition}”，正文却出现过度正常化描写`,
+              evidence: {
+                version_id: input.versionId,
+                text_hash: input.textHash,
+                ...evidence,
+              },
+              suggested_fix: "保留伤病/中毒余波，或补充恢复过程",
+            },
+            issues.length,
+          ),
+        );
+      }
+    }
+
+    for (const flag of snapshot.ability_flags ?? []) {
+      const hit = abilityRegressionPhrases(flag).find((phrase) => input.text.includes(phrase));
+      if (hit && mentionsCharacter) {
+        const evidence = findEvidence(input.text, hit);
+        issues.push(
+          createIssue(
+            {
+              type: "ability_regression",
+              severity: "high",
+              message: `${character.name} 能力状态为“${flag}”，正文却直接恢复使用`,
+              evidence: {
+                version_id: input.versionId,
+                text_hash: input.textHash,
+                ...evidence,
+              },
+              suggested_fix: "补充恢复条件，或改写为受限状态下的替代行动",
+            },
+            issues.length,
+          ),
+        );
+      }
+    }
+
+    if (
+      mentionsCharacter &&
+      (snapshot.identity_flags ?? []).some((flag) => flag.includes("暴露") || flag.includes("公开")) &&
+      includesAny(input.text, ["无人知晓", "仍在隐瞒", "没人知道"])
+    ) {
+      const evidence = findEvidence(input.text, character.name);
+      issues.push(
+        createIssue(
+          {
+            type: "identity_regression",
+            severity: "med",
+            message: `${character.name} 的身份已暴露，正文却仍按未暴露状态描写`,
+            evidence: {
+              version_id: input.versionId,
+              text_hash: input.textHash,
+              ...evidence,
+            },
+            suggested_fix: "改写知情范围，或补充重新隐匿的过程",
+          },
+          issues.length,
+        ),
+      );
+    }
+
+    if (snapshot.allegiance && snapshot.previous_allegiance) {
+      const hit = allegianceConflictPhrases(snapshot.previous_allegiance).find((phrase) => input.text.includes(phrase));
+      if (hit && mentionsCharacter && !input.text.includes(snapshot.allegiance)) {
+        const evidence = findEvidence(input.text, hit);
+        issues.push(
+          createIssue(
+            {
+              type: "allegiance_regression",
+              severity: "med",
+              message: `${character.name} 已转向“${snapshot.allegiance}”，正文却仍按旧归属“${snapshot.previous_allegiance}”描写`,
+              evidence: {
+                version_id: input.versionId,
+                text_hash: input.textHash,
+                ...evidence,
+              },
+              suggested_fix: "同步新的归属关系，或补充短暂伪装/卧底说明",
             },
             issues.length,
           ),
