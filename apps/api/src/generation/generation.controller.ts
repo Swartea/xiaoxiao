@@ -48,6 +48,11 @@ export class GenerationController {
     return this.generationService.fix(chapterId, payload, idempotencyKey);
   }
 
+  @Post("fix/preview")
+  previewFix(@Param("chapterId") chapterId: string, @Body() payload: unknown) {
+    return this.generationService.previewFix(chapterId, payload);
+  }
+
   @Patch("facts/:factId/status")
   updateFactStatus(
     @Param("chapterId") chapterId: string,

@@ -10,11 +10,13 @@ import {
   ExtractedStatus,
   GenerationRequestStatus,
   Prisma,
+  PromptTemplateStage,
+  ResourceReferenceOrigin,
   VersionStage,
   type Chapter,
   type ChapterVersion,
 } from "@prisma/client";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { createPatch } from "diff";
 import {
   buildGenerationContext,
@@ -35,7 +37,10 @@ import {
   type VersionStage as SharedVersionStage,
 } from "@novel-factory/shared";
 import { PrismaService } from "../prisma.service";
+import { StoryReferenceService } from "../story-resources/story-reference.service";
+import { StoryResourcesService } from "../story-resources/story-resources.service";
 import { CheckContinuityDto, GenerateStageDto } from "./dto";
+import { PromptEngine } from "../storyos/engines/prompt.engine";
 
 type Stage = Exclude<SharedVersionStage, "fix"> | "fix";
 
@@ -66,6 +71,36 @@ type StageBaseInput = {
   stage: VersionStage;
   text: string;
   numericAnchors: string[];
+};
+
+type RuntimePromptOptions = {
+  promptTemplateVersionId?: string;
+  promptVersion?: number;
+  platformVariant?: string;
+  stylePresetName?: string;
+  modelOverride?: string;
+  retrieverStrategy?: string;
+};
+
+type FixPromptContext = {
+  request: FixRequest;
+  beforeText: string;
+  targetText: string;
+  afterText: string;
+  baseVersionId: string;
+  numericAnchors: string[];
+};
+
+type RuntimePromptTrace = {
+  promptName: string;
+  promptVersionLabel: string;
+  promptTemplateVersionId?: string;
+  platformVariant: string;
+  stylePresetName: string | null;
+  system: string;
+  user: string;
+  inputSummary: Record<string, unknown>;
+  source: "template" | "legacy";
 };
 
 function scoreByMatch({
@@ -105,6 +140,37 @@ function toRequiredJson(value: unknown): Prisma.InputJsonValue {
     return {} as Prisma.InputJsonObject;
   }
   return value as Prisma.InputJsonValue;
+}
+
+function toRecord(value: unknown): Record<string, unknown> | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return null;
+  }
+  return value as Record<string, unknown>;
+}
+
+function toStringArray(value: unknown, limit = 8): string[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value
+    .map((item) => (typeof item === "string" ? item.trim() : ""))
+    .filter(Boolean)
+    .slice(0, limit);
+}
+
+function stringifyValue(value: unknown) {
+  if (typeof value === "string") {
+    return value;
+  }
+  if (value === undefined || value === null) {
+    return "";
+  }
+  return JSON.stringify(value);
+}
+
+function excerpt(value: string, maxLength = 240) {
+  return value.length > maxLength ? `${value.slice(0, maxLength)}...` : value;
 }
 
 const MAJOR_STATUS_KEYWORDS = [
@@ -163,7 +229,12 @@ export class GenerationService {
   private provider: LlmProvider | null;
   private readonly modelConfig: StageModelConfig;
 
-  constructor(@Inject(PrismaService) private readonly prisma: PrismaService) {
+  constructor(
+    @Inject(PrismaService) private readonly prisma: PrismaService,
+    @Inject(StoryResourcesService) private readonly storyResourcesService: StoryResourcesService,
+    @Inject(StoryReferenceService) private readonly storyReferenceService: StoryReferenceService,
+    @Inject(PromptEngine) private readonly promptEngine: PromptEngine,
+  ) {
     const providerName = (process.env.LLM_PROVIDER ?? "openai").toLowerCase();
     const openAiApiKey = process.env.OPENAI_API_KEY;
     const deepSeekApiKey = process.env.DEEPSEEK_API_KEY;
@@ -210,6 +281,68 @@ export class GenerationService {
     if (stage === "draft") return "Draft";
     if (stage === "polish") return "Polish";
     return "Fix";
+  }
+
+  private agentNameByStage(stage: Stage) {
+    if (stage === "beats") return "BeatAgent";
+    if (stage === "draft") return "DraftAgent";
+    if (stage === "polish") return "PolishAgent";
+    return "FixAgent";
+  }
+
+  private promptNameByStage(stage: Stage) {
+    if (stage === "beats") return "beats_prompt";
+    if (stage === "draft") return "draft_prompt";
+    if (stage === "polish") return "polish_prompt";
+    return "fix_prompt";
+  }
+
+  private promptStageByStage(stage: Stage) {
+    if (stage === "beats") return PromptTemplateStage.beats;
+    if (stage === "draft") return PromptTemplateStage.draft;
+    if (stage === "polish") return PromptTemplateStage.polish;
+    return PromptTemplateStage.fix;
+  }
+
+  private async recordAgentRun(args: {
+    runId: string;
+    projectId: string;
+    chapterId: string;
+    versionId: string;
+    stage: Stage;
+    promptName?: string;
+    promptVersionLabel?: string;
+    promptTemplateVersionId?: string;
+    platformVariant?: string;
+    model: string;
+    stylePreset?: string | null;
+    retrieverStrategy?: string;
+    contextHash?: string;
+    qualityScore?: number;
+    inputPayload?: Record<string, unknown>;
+    outputPayload?: Record<string, unknown>;
+  }) {
+    await this.prisma.agentRun.create({
+      data: {
+        run_id: args.runId,
+        project_id: args.projectId,
+        chapter_id: args.chapterId,
+        version_id: args.versionId,
+        agent_name: this.agentNameByStage(args.stage),
+        prompt_name: args.promptName ?? this.promptNameByStage(args.stage),
+        prompt_version: args.promptVersionLabel ?? "legacy:v1",
+        prompt_template_version_id: args.promptTemplateVersionId ?? undefined,
+        platform_variant: args.platformVariant ?? undefined,
+        model: args.model,
+        style_preset: args.stylePreset ?? undefined,
+        retriever_strategy: args.retrieverStrategy ?? "hybrid-sql-v1",
+        context_hash: args.contextHash ?? undefined,
+        token_usage: toJson({}),
+        quality_score: args.qualityScore ?? null,
+        input_payload: toJson(args.inputPayload ?? {}),
+        output_payload: toJson(args.outputPayload ?? {}),
+      },
+    });
   }
 
   private normalizeStatusValue(value: unknown): string | null {
@@ -302,15 +435,317 @@ export class GenerationService {
   }
 
   private async resolveChapter(chapterId: string) {
-    const chapter = await this.prisma.chapter.findUnique({ where: { id: chapterId } });
-    if (!chapter) {
+    const chapter = await this.prisma.chapter.findUnique({
+      where: { id: chapterId },
+      include: {
+        project: {
+          include: {
+            stylePreset: true,
+          },
+        },
+      },
+    });
+    if (!chapter?.project) {
       throw new NotFoundException("Chapter not found");
     }
-    const project = await this.prisma.project.findUnique({ where: { id: chapter.project_id } });
-    if (!project) {
-      throw new NotFoundException("Project not found");
+    const { project, ...chapterData } = chapter;
+    return { chapter: chapterData, project };
+  }
+
+  private async resolveStylePreset(
+    project: Awaited<ReturnType<GenerationService["resolveChapter"]>>["project"],
+    explicitStylePresetName?: string,
+  ) {
+    if (explicitStylePresetName?.trim()) {
+      return this.prisma.stylePreset.findFirst({
+        where: { name: explicitStylePresetName.trim() },
+      });
     }
-    return { chapter, project };
+
+    if (project.stylePreset) {
+      return project.stylePreset;
+    }
+
+    if (project.target_platform?.trim()) {
+      return this.prisma.stylePreset.findFirst({
+        where: { name: project.target_platform.trim() },
+      });
+    }
+
+    return null;
+  }
+
+  private stylePresetForPrompt(stylePreset: Awaited<ReturnType<GenerationService["resolveStylePreset"]>>) {
+    if (!stylePreset) {
+      return {
+        name: "default",
+        target_platform: "default",
+        sentence_length: null,
+        paragraph_density: null,
+        dialogue_ratio_min: null,
+        dialogue_ratio_max: null,
+        exposition_limit: null,
+        opening_hook_required: true,
+        ending_hook_required: true,
+        taboo_rules: [],
+        favored_devices: [],
+        pacing_profile: null,
+      };
+    }
+
+    return {
+      name: stylePreset.name,
+      target_platform: stylePreset.target_platform ?? stylePreset.name,
+      sentence_length: stylePreset.sentence_length ?? null,
+      paragraph_density: stylePreset.paragraph_density ?? null,
+      dialogue_ratio_min: stylePreset.dialogue_ratio_min ?? null,
+      dialogue_ratio_max: stylePreset.dialogue_ratio_max ?? null,
+      exposition_limit: stylePreset.exposition_limit ?? null,
+      opening_hook_required: stylePreset.opening_hook_required,
+      ending_hook_required: stylePreset.ending_hook_required,
+      taboo_rules: stylePreset.taboo_rules ?? [],
+      favored_devices: stylePreset.favored_devices ?? [],
+      pacing_profile: stylePreset.pacing_profile ?? null,
+      tone: stylePreset.tone ?? null,
+      pacing: stylePreset.pacing ?? null,
+    };
+  }
+
+  private buildPromptContextBrief(args: {
+    chapter: Chapter;
+    context: unknown;
+    latestIntent?: {
+      chapter_mission: string;
+      conflict_target?: string | null;
+      hook_target?: string | null;
+    } | null;
+  }) {
+    const generationContext = toRecord(args.context);
+    const recentChapterSummaries = Array.isArray(generationContext?.recent_chapter_summaries)
+      ? generationContext.recent_chapter_summaries
+          .map((item) => {
+            const summary = toRecord(item)?.summary;
+            return typeof summary === "string" ? summary : "";
+          })
+          .filter(Boolean)
+      : [];
+    const relevantFacts = Array.isArray(generationContext?.relevant_facts)
+      ? generationContext.relevant_facts
+          .map((item) => {
+            const content = toRecord(item)?.content;
+            return typeof content === "string" ? content : "";
+          })
+          .filter(Boolean)
+      : [];
+    const relationshipSlice = Array.isArray(generationContext?.relationship_slice)
+      ? generationContext.relationship_slice
+          .map((item) => {
+            const record = toRecord(item);
+            const from = typeof record?.from === "string" ? record.from : "";
+            const to = typeof record?.to === "string" ? record.to : "";
+            const type = typeof record?.type === "string" ? record.type : "";
+            return [from, to].filter(Boolean).join("-") + (type ? `(${type})` : "");
+          })
+          .filter(Boolean)
+      : [];
+    const relevantSeeds = Array.isArray(generationContext?.relevant_seeds)
+      ? generationContext.relevant_seeds
+          .map((item) => {
+            const content = toRecord(item)?.content;
+            return typeof content === "string" ? content : "";
+          })
+          .filter(Boolean)
+      : [];
+    const safetyRules = Array.isArray(generationContext?.safety_rules)
+      ? generationContext.safety_rules
+          .map((item) => {
+            const record = toRecord(item);
+            const label = typeof record?.label === "string" ? record.label : "";
+            const value = typeof record?.value === "string" ? record.value : "";
+            return [label, value].filter(Boolean).join(": ");
+          })
+          .filter(Boolean)
+      : [];
+
+    return {
+      chapter_mission:
+        args.latestIntent?.chapter_mission ??
+        (typeof generationContext?.chapter_goal === "string" && generationContext.chapter_goal.trim()
+          ? generationContext.chapter_goal
+          : args.chapter.goal ?? `第${args.chapter.chapter_no}章推进主线`),
+      must_remember: [
+        typeof generationContext?.bible_summary === "string" ? generationContext.bible_summary : "",
+        ...recentChapterSummaries,
+        ...relevantFacts,
+      ]
+        .filter(Boolean)
+        .slice(0, 10),
+      must_not_violate: [
+        ...toStringArray(generationContext?.constraints, 8),
+        ...safetyRules.slice(0, 8),
+      ].slice(0, 10),
+      active_relationships: relationshipSlice.slice(0, 8),
+      payoff_targets: relevantSeeds.slice(0, 8),
+      danger_points: [
+        args.latestIntent?.conflict_target ?? "",
+        args.chapter.conflict ?? "",
+        args.latestIntent?.hook_target ?? "",
+        args.chapter.cliffhanger ?? "",
+      ]
+        .filter(Boolean)
+        .slice(0, 8),
+    };
+  }
+
+  private summarizePromptInput(input: Record<string, unknown>) {
+    return Object.fromEntries(
+      Object.entries(input).map(([key, value]) => {
+        if (typeof value === "string") {
+          return [key, excerpt(value, 240)];
+        }
+        if (Array.isArray(value)) {
+          return [key, value.slice(0, 6)];
+        }
+        if (value && typeof value === "object") {
+          return [key, value];
+        }
+        return [key, value ?? null];
+      }),
+    );
+  }
+
+  private async buildPromptRuntime(args: {
+    stage: Stage;
+    chapter: Chapter;
+    project: Awaited<ReturnType<GenerationService["resolveChapter"]>>["project"];
+    context: unknown;
+    instruction?: string;
+    baseInput?: StageBaseInput | null;
+    runtimeOptions?: RuntimePromptOptions;
+    fixContext?: FixPromptContext;
+  }): Promise<RuntimePromptTrace> {
+    const latestIntent = await this.prisma.chapterIntent.findFirst({
+      where: { chapter_id: args.chapter.id },
+      orderBy: { version_no: "desc" },
+    });
+    const stylePresetRecord = await this.resolveStylePreset(args.project, args.runtimeOptions?.stylePresetName);
+    const stylePreset = this.stylePresetForPrompt(stylePresetRecord);
+    const platformVariant =
+      args.runtimeOptions?.platformVariant?.trim() ||
+      stylePreset.name ||
+      args.project.target_platform?.trim() ||
+      "default";
+
+    let promptInput: Record<string, unknown>;
+    if (args.stage === "beats") {
+      promptInput = {
+        chapter_intent: latestIntent
+          ? {
+              chapter_mission: latestIntent.chapter_mission,
+              advance_goal: latestIntent.advance_goal,
+              conflict_target: latestIntent.conflict_target,
+              hook_target: latestIntent.hook_target,
+              pacing_direction: latestIntent.pacing_direction,
+            }
+          : {
+              chapter_mission: args.chapter.goal ?? `第${args.chapter.chapter_no}章推进主线`,
+              conflict_target: args.chapter.conflict ?? null,
+              hook_target: args.chapter.cliffhanger ?? null,
+            },
+        context_brief: this.buildPromptContextBrief({
+          chapter: args.chapter,
+          context: args.context,
+          latestIntent,
+        }),
+        style_preset: stylePreset,
+        instruction: args.instruction ?? "",
+      };
+    } else if (args.stage === "fix") {
+      const fixContext = args.fixContext;
+      promptInput = {
+        context_brief: this.buildPromptContextBrief({
+          chapter: args.chapter,
+          context: args.context,
+          latestIntent,
+        }),
+        style_preset: stylePreset,
+        base_text: fixContext?.targetText ?? args.baseInput?.text ?? "",
+        numeric_anchors: fixContext?.numericAnchors ?? args.baseInput?.numericAnchors ?? [],
+        instruction: args.instruction ?? "",
+        issue_type:
+          fixContext?.request.issue_type ??
+          fixContext?.request.issue_ids?.[0] ??
+          fixContext?.request.strategy_id ??
+          fixContext?.request.mode ??
+          "fix",
+        keep_elements: fixContext?.request.keep_elements ?? [],
+        forbidden_changes: fixContext?.request.forbidden_changes ?? [],
+        target_intensity: fixContext?.request.target_intensity ?? "medium",
+        before_text: fixContext?.beforeText ?? "",
+        target_text: fixContext?.targetText ?? "",
+        after_text: fixContext?.afterText ?? "",
+        base_version_id: fixContext?.baseVersionId ?? args.baseInput?.versionId ?? "",
+        mode: fixContext?.request.mode ?? "replace_span",
+        issue_ids: fixContext?.request.issue_ids ?? [],
+        strategy_id: fixContext?.request.strategy_id ?? "",
+      };
+    } else {
+      promptInput = {
+        context_brief: this.buildPromptContextBrief({
+          chapter: args.chapter,
+          context: args.context,
+          latestIntent,
+        }),
+        style_preset: stylePreset,
+        base_text: args.baseInput?.text ?? "",
+        numeric_anchors: args.baseInput?.numericAnchors ?? [],
+        instruction: args.instruction ?? "",
+        base_version_id: args.baseInput?.versionId ?? "",
+        base_stage: args.baseInput?.stage ?? "",
+      };
+    }
+
+    const resolved = await this.promptEngine.resolvePrompt({
+      promptName: this.promptNameByStage(args.stage),
+      stage: this.promptStageByStage(args.stage),
+      projectId: args.project.id,
+      promptTemplateVersionId: args.runtimeOptions?.promptTemplateVersionId,
+      promptVersion: args.runtimeOptions?.promptVersion,
+      platformVariant,
+      input: promptInput,
+    });
+
+    if (resolved.prompt_version === "fallback:legacy") {
+      const fallback = this.buildGenerationPrompt(
+        args.stage,
+        args.chapter,
+        args.context,
+        args.instruction,
+        args.baseInput ?? null,
+      );
+      return {
+        promptName: this.promptNameByStage(args.stage),
+        promptVersionLabel: "legacy:v1",
+        platformVariant,
+        stylePresetName: stylePresetRecord?.name ?? null,
+        system: fallback.system,
+        user: fallback.user,
+        inputSummary: this.summarizePromptInput(promptInput),
+        source: "legacy",
+      };
+    }
+
+    return {
+      promptName: resolved.prompt_name,
+      promptVersionLabel: resolved.prompt_version,
+      promptTemplateVersionId: resolved.prompt_template_version_id,
+      platformVariant: resolved.platform_variant ?? platformVariant,
+      stylePresetName: stylePresetRecord?.name ?? null,
+      system: resolved.system_rendered,
+      user: resolved.user_rendered,
+      inputSummary: this.summarizePromptInput(promptInput),
+      source: "template",
+    };
   }
 
   private async loadOrCreateRequest(args: {
@@ -390,43 +825,61 @@ export class GenerationService {
   }
 
   private async retrieveMemory(chapter: Chapter, queryEntities: string[], k: number): Promise<RetrievedMemoryPackage> {
-    const [entities, glossary, recentMemories, characters, facts, seeds, timeline] = await Promise.all([
-      this.prisma.bibleEntity.findMany({ where: { project_id: chapter.project_id } }),
-      this.prisma.glossaryTerm.findMany({ where: { project_id: chapter.project_id } }),
-      this.prisma.chapterMemory.findMany({
-        where: {
-          chapter: {
-            project_id: chapter.project_id,
-            chapter_no: { lt: chapter.chapter_no },
+    const [resourceBundle, prioritizedRefs, entities, glossary, recentMemories, characters, facts, seeds, timeline] =
+      await Promise.all([
+        this.storyResourcesService.getProjectResourceBundle(chapter.project_id),
+        this.storyReferenceService.getPrioritizedReferenceIds(chapter.project_id, chapter.id),
+        this.prisma.bibleEntity.findMany({ where: { project_id: chapter.project_id } }),
+        this.prisma.glossaryTerm.findMany({ where: { project_id: chapter.project_id } }),
+        this.prisma.chapterMemory.findMany({
+          where: {
+            chapter: {
+              project_id: chapter.project_id,
+              chapter_no: { lt: chapter.chapter_no },
+            },
           },
-        },
-        include: { chapter: true },
-        orderBy: { created_at: "desc" },
-        take: 20,
-      }),
-      this.prisma.character.findMany({ where: { project_id: chapter.project_id } }),
-      this.prisma.fact.findMany({
-        where: {
-          project_id: chapter.project_id,
-          status: { in: [ExtractedStatus.confirmed, ExtractedStatus.extracted] },
-        },
-        orderBy: [{ chapter_no: "desc" }],
-        take: 120,
-      }),
-      this.prisma.seed.findMany({
-        where: { project_id: chapter.project_id },
-        orderBy: [{ planted_chapter_no: "desc" }],
-        take: 120,
-      }),
-      this.prisma.timelineEvent.findMany({
-        where: {
-          project_id: chapter.project_id,
-          status: { in: [ExtractedStatus.confirmed, ExtractedStatus.extracted] },
-        },
-        orderBy: [{ chapter_no_ref: "desc" }],
-        take: 120,
-      }),
-    ]);
+          include: { chapter: true },
+          orderBy: { created_at: "desc" },
+          take: 20,
+        }),
+        this.prisma.character.findMany({ where: { project_id: chapter.project_id } }),
+        this.prisma.fact.findMany({
+          where: {
+            project_id: chapter.project_id,
+            status: { in: [ExtractedStatus.confirmed, ExtractedStatus.extracted] },
+          },
+          orderBy: [{ chapter_no: "desc" }],
+          take: 120,
+        }),
+        this.prisma.seed.findMany({
+          where: { project_id: chapter.project_id },
+          orderBy: [{ planted_chapter_no: "desc" }],
+          take: 120,
+        }),
+        this.prisma.timelineEvent.findMany({
+          where: {
+            project_id: chapter.project_id,
+            status: { in: [ExtractedStatus.confirmed, ExtractedStatus.extracted] },
+          },
+          orderBy: [{ chapter_no_ref: "desc" }],
+          take: 120,
+        }),
+      ]);
+
+    const confirmedCharacterIds = new Set(prioritizedRefs.confirmed.characters);
+    const inferredCharacterIds = new Set(prioritizedRefs.inferred.characters);
+    const confirmedGlossaryIds = new Set(prioritizedRefs.confirmed.glossary);
+    const inferredGlossaryIds = new Set(prioritizedRefs.inferred.glossary);
+    const confirmedTimelineIds = new Set(prioritizedRefs.confirmed.timeline);
+    const inferredTimelineIds = new Set(prioritizedRefs.inferred.timeline);
+    const confirmedRelationshipIds = new Set(prioritizedRefs.confirmed.relationships);
+    const inferredRelationshipIds = new Set(prioritizedRefs.inferred.relationships);
+    const confirmedSensitiveIds = new Set(prioritizedRefs.confirmed.sensitive_words);
+    const inferredSensitiveIds = new Set(prioritizedRefs.inferred.sensitive_words);
+    const confirmedRegexIds = new Set(prioritizedRefs.confirmed.regex_rules);
+    const inferredRegexIds = new Set(prioritizedRefs.inferred.regex_rules);
+    const sensitiveWords = resourceBundle.sensitiveWords;
+    const regexRules = resourceBundle.regexRules;
 
     const entitiesFromChapter = [chapter.goal, chapter.conflict, chapter.twist, chapter.title]
       .filter(Boolean)
@@ -442,8 +895,20 @@ export class GenerationService {
 
     const involvedCharacters =
       resolvedEntities.length > 0
-        ? characters.filter((c) => resolvedEntities.some((name) => c.name.includes(name) || name.includes(c.name)))
-        : characters.slice(0, 8);
+        ? characters.filter(
+            (c) =>
+              confirmedCharacterIds.has(c.id) ||
+              inferredCharacterIds.has(c.id) ||
+              resolvedEntities.some((name) => c.name.includes(name) || name.includes(c.name)),
+          )
+        : characters
+            .slice()
+            .sort((a, b) => {
+              const aScore = Number(confirmedCharacterIds.has(a.id)) * 2 + Number(inferredCharacterIds.has(a.id));
+              const bScore = Number(confirmedCharacterIds.has(b.id)) * 2 + Number(inferredCharacterIds.has(b.id));
+              return bScore - aScore;
+            })
+            .slice(0, 8);
 
     const relationships = await this.prisma.relationship.findMany({
       where: {
@@ -488,7 +953,7 @@ export class GenerationService {
           queryEntities: resolvedEntities,
           recencyDelta: 0,
           typeWeight: 6,
-        }),
+        }) + (confirmedGlossaryIds.has(term.id) ? 30 : inferredGlossaryIds.has(term.id) ? 12 : 0),
         source_table: "glossary_terms",
         source_id: term.id,
       }))
@@ -533,7 +998,7 @@ export class GenerationService {
           queryEntities: resolvedEntities,
           recencyDelta: 0,
           typeWeight: 10,
-        }),
+        }) + (confirmedCharacterIds.has(character.id) ? 40 : inferredCharacterIds.has(character.id) ? 15 : 0),
         source_table: "characters",
         source_id: character.id,
       }))
@@ -556,7 +1021,7 @@ export class GenerationService {
           queryEntities: resolvedEntities,
           recencyDelta: rel.last_updated_chapter_no ? chapter.chapter_no - rel.last_updated_chapter_no : 0,
           typeWeight: 7,
-        }),
+        }) + (confirmedRelationshipIds.has(rel.id) ? 25 : inferredRelationshipIds.has(rel.id) ? 10 : 0),
         source_table: "relationships",
         source_id: rel.id,
         entity_id: `${rel.from_character_id}:${rel.to_character_id}`,
@@ -631,7 +1096,7 @@ export class GenerationService {
           queryEntities: resolvedEntities,
           recencyDelta: chapter.chapter_no - event.chapter_no_ref,
           typeWeight: 7,
-        }),
+        }) + (confirmedTimelineIds.has(event.id) ? 22 : inferredTimelineIds.has(event.id) ? 8 : 0),
         source_table: "timeline_events",
         source_id: event.id,
         entity_id: event.chapter_no_ref.toString(),
@@ -639,6 +1104,59 @@ export class GenerationService {
       }))
       .sort((a, b) => b.score - a.score)
       .map((item, index) => ({ ...item, rank: index + 1 }));
+
+    const sensitiveWordItems = sensitiveWords
+      .map((item) => ({
+        id: item.id,
+        data: {
+          term: item.term,
+          replacement: item.replacement,
+          severity: item.severity,
+          notes: item.notes,
+        },
+        rank: 0,
+        score: confirmedSensitiveIds.has(item.id) ? 50 : inferredSensitiveIds.has(item.id) ? 20 : 5,
+        source_table: "sensitive_words",
+        source_id: item.id,
+      }))
+      .sort((a, b) => b.score - a.score)
+      .map((item, index) => ({ ...item, rank: index + 1 }));
+
+    const regexRuleItems = regexRules
+      .map((item) => ({
+        id: item.id,
+        data: {
+          name: item.name,
+          pattern: item.pattern,
+          flags: item.flags,
+          severity: item.severity,
+          description: item.description,
+        },
+        rank: 0,
+        score: confirmedRegexIds.has(item.id) ? 50 : inferredRegexIds.has(item.id) ? 20 : 5,
+        source_table: "regex_rules",
+        source_id: item.id,
+      }))
+      .sort((a, b) => b.score - a.score)
+      .map((item, index) => ({ ...item, rank: index + 1 }));
+
+    const referencedResources = [
+      ...characterSnapshots.map((item) => ({
+        resource_type: "character",
+        resource_id: item.source_id,
+        state: confirmedCharacterIds.has(item.source_id) ? ("confirmed" as "confirmed" | "inferred") : ("inferred" as "confirmed" | "inferred"),
+      })),
+      ...glossaryItems.slice(0, 12).map((item) => ({
+        resource_type: "glossary",
+        resource_id: item.source_id,
+        state: confirmedGlossaryIds.has(item.source_id) ? ("confirmed" as "confirmed" | "inferred") : ("inferred" as "confirmed" | "inferred"),
+      })),
+      ...timelineItems.slice(0, 8).map((item) => ({
+        resource_type: "timeline_event",
+        resource_id: item.source_id,
+        state: confirmedTimelineIds.has(item.source_id) ? ("confirmed" as "confirmed" | "inferred") : ("inferred" as "confirmed" | "inferred"),
+      })),
+    ];
 
     return {
       bibleRules,
@@ -649,15 +1167,21 @@ export class GenerationService {
       facts: factsItems,
       seeds: seedItems,
       timeline: timelineItems,
+      sensitiveWords: sensitiveWordItems,
+      regexRules: regexRuleItems,
+      referencedResources,
       retrieverMeta: {
         k,
         query_entities: resolvedEntities,
         filters: {
           project_id: chapter.project_id,
           chapter_no: chapter.chapter_no,
+          reference_priority: ["confirmed", "inferred", "project_fallback"],
         },
-        ordering: ["entity_match", "recency", "type_weight", "unresolved_seed_bonus"],
+        ordering: ["reference_priority", "entity_match", "recency", "type_weight", "unresolved_seed_bonus"],
         ids_selected: [
+          ...characterSnapshots.slice(0, 8).map((item) => item.id),
+          ...glossaryItems.slice(0, 8).map((item) => item.id),
           ...factsItems.slice(0, k).map((f) => f.id),
           ...seedItems.slice(0, k).map((s) => s.id),
           ...timelineItems.slice(0, k).map((t) => t.id),
@@ -785,46 +1309,90 @@ export class GenerationService {
     };
   }
 
-  private async generateText(
-    stage: Stage,
-    chapter: Chapter,
-    context: unknown,
-    instruction?: string,
-    baseInput?: StageBaseInput | null,
-  ) {
-    const prompt = this.buildGenerationPrompt(stage, chapter, context, instruction, baseInput);
+  private resolveModelForStage(stage: Stage, override?: string) {
+    if (override?.trim()) {
+      return override.trim();
+    }
+    if (stage === "beats") return this.modelConfig.beats;
+    if (stage === "draft") return this.modelConfig.draft;
+    if (stage === "polish") return this.modelConfig.polish;
+    return this.modelConfig.fix;
+  }
+
+  private async generateText(args: {
+    stage: Stage;
+    chapter: Chapter;
+    project: Awaited<ReturnType<GenerationService["resolveChapter"]>>["project"];
+    context: unknown;
+    instruction?: string;
+    baseInput?: StageBaseInput | null;
+    runtimeOptions?: RuntimePromptOptions;
+    fixContext?: FixPromptContext;
+  }) {
+    const promptTrace = await this.buildPromptRuntime({
+      stage: args.stage,
+      chapter: args.chapter,
+      project: args.project,
+      context: args.context,
+      instruction: args.instruction,
+      baseInput: args.baseInput,
+      runtimeOptions: args.runtimeOptions,
+      fixContext: args.fixContext,
+    });
+    const model = this.resolveModelForStage(args.stage, args.runtimeOptions?.modelOverride);
 
     if (!this.provider) {
-      return [
-        `[${this.stageLabel(stage)} Mock Output]`,
-        `Chapter ${chapter.chapter_no}${chapter.title ? `: ${chapter.title}` : ""}`,
-        instruction ? `Instruction: ${instruction}` : "",
-        "",
-        "在没有配置 OPENAI_API_KEY 的情况下，返回可运行的占位文本。",
-        "请配置 API Key 后得到真实模型输出。",
-      ]
-        .filter(Boolean)
-        .join("\n");
+      return {
+        text: [
+          `[${this.stageLabel(args.stage)} Mock Output]`,
+          `Chapter ${args.chapter.chapter_no}${args.chapter.title ? `: ${args.chapter.title}` : ""}`,
+          args.instruction ? `Instruction: ${args.instruction}` : "",
+          "",
+          "在没有配置 OPENAI_API_KEY 的情况下，返回可运行的占位文本。",
+          "请配置 API Key 后得到真实模型输出。",
+        ]
+          .filter(Boolean)
+          .join("\n"),
+        model,
+        promptTrace,
+      };
     }
 
-    const model =
-      stage === "beats"
-        ? this.modelConfig.beats
-        : stage === "draft"
-          ? this.modelConfig.draft
-          : stage === "polish"
-            ? this.modelConfig.polish
-            : this.modelConfig.fix;
+    const configuredBeatsTimeout = Number.parseInt(process.env.LLM_TIMEOUT_BEATS_MS ?? "", 10);
+    const configuredDraftTimeout = Number.parseInt(process.env.LLM_TIMEOUT_DRAFT_MS ?? "", 10);
+    const configuredPolishTimeout = Number.parseInt(process.env.LLM_TIMEOUT_POLISH_MS ?? "", 10);
+    const configuredFixTimeout = Number.parseInt(process.env.LLM_TIMEOUT_FIX_MS ?? "", 10);
+    const beatsTimeoutMs =
+      Number.isFinite(configuredBeatsTimeout) && configuredBeatsTimeout > 0 ? configuredBeatsTimeout : 240_000;
+    const draftTimeoutMs =
+      Number.isFinite(configuredDraftTimeout) && configuredDraftTimeout > 0 ? configuredDraftTimeout : 300_000;
+    const polishTimeoutMs =
+      Number.isFinite(configuredPolishTimeout) && configuredPolishTimeout > 0 ? configuredPolishTimeout : 480_000;
+    const fixTimeoutMs = Number.isFinite(configuredFixTimeout) && configuredFixTimeout > 0 ? configuredFixTimeout : 420_000;
+
+    const timeoutMs =
+      args.stage === "beats"
+        ? beatsTimeoutMs
+        : args.stage === "draft"
+          ? draftTimeoutMs
+          : args.stage === "polish"
+            ? polishTimeoutMs
+            : fixTimeoutMs;
 
     const result = await this.provider.generateText({
-      system: prompt.system,
-      user: prompt.user,
+      system: promptTrace.system,
+      user: promptTrace.user,
       model,
-      temperature: stage === "polish" ? 0.8 : 0.6,
+      temperature: args.stage === "polish" ? 0.8 : 0.6,
       maxTokens: 3000,
+      timeoutMs,
     });
 
-    return result.text;
+    return {
+      text: result.text,
+      model: result.model,
+      promptTrace,
+    };
   }
 
   private async normalizeDraftPolishLengthAndStyle(args: {
@@ -842,6 +1410,9 @@ export class GenerationService {
 
     const target = charCount < CHAPTER_MIN_CHARS ? 3400 : 4500;
     const direction = charCount < CHAPTER_MIN_CHARS ? "扩写" : "压缩";
+    const configuredPolishTimeout = Number.parseInt(process.env.LLM_TIMEOUT_POLISH_MS ?? "", 10);
+    const polishTimeoutMs =
+      Number.isFinite(configuredPolishTimeout) && configuredPolishTimeout > 0 ? configuredPolishTimeout : 480_000;
 
     const result = await this.provider.generateText({
       model: this.modelConfig.polish,
@@ -856,6 +1427,7 @@ export class GenerationService {
       ].join("\n"),
       temperature: 0.4,
       maxTokens: 3500,
+      timeoutMs: polishTimeoutMs,
     });
 
     return result.text;
@@ -880,6 +1452,10 @@ export class GenerationService {
       return args.text;
     }
 
+    const configuredPolishTimeout = Number.parseInt(process.env.LLM_TIMEOUT_POLISH_MS ?? "", 10);
+    const polishTimeoutMs =
+      Number.isFinite(configuredPolishTimeout) && configuredPolishTimeout > 0 ? configuredPolishTimeout : 480_000;
+
     const result = await this.provider.generateText({
       model: this.modelConfig.polish,
       system: "你是小说文本编辑器。输出连续正文，不要解释。",
@@ -894,6 +1470,7 @@ export class GenerationService {
       ].join("\n"),
       temperature: 0.3,
       maxTokens: 3500,
+      timeoutMs: polishTimeoutMs,
     });
 
     return result.text;
@@ -1160,10 +1737,10 @@ export class GenerationService {
     chapter: Chapter;
     version: ChapterVersion;
   }) {
-    const [glossary, characters, facts] = await Promise.all([
-      this.prisma.glossaryTerm.findMany({ where: { project_id: args.chapter.project_id } }),
-      this.prisma.character.findMany({ where: { project_id: args.chapter.project_id } }),
+    const [resourceBundle, facts, chapterReferences] = await Promise.all([
+      this.storyResourcesService.getProjectResourceBundle(args.chapter.project_id),
       this.prisma.fact.findMany({ where: { project_id: args.chapter.project_id } }),
+      this.storyReferenceService.getChapterReferences(args.chapter.project_id, args.chapter.id),
     ]);
 
     const report = runContinuityCheck({
@@ -1171,8 +1748,8 @@ export class GenerationService {
       textHash: args.version.text_hash,
       chapterNo: args.chapter.chapter_no,
       text: args.version.text,
-      glossary: glossary.map((g) => ({ term: g.term, canonical_form: g.canonical_form })),
-      characters: characters.map((c) => ({
+      glossary: resourceBundle.glossary.map((g) => ({ term: g.term, canonical_form: g.canonical_form })),
+      characters: resourceBundle.characters.map((c) => ({
         id: c.id,
         name: c.name,
         age: c.age,
@@ -1184,6 +1761,27 @@ export class GenerationService {
         chapter_no: f.chapter_no,
         known_by_character_ids: f.known_by_character_ids,
       })),
+      sensitive_words: resourceBundle.sensitiveWords.map((item) => ({
+        id: item.id,
+        term: item.term,
+        replacement: item.replacement,
+        severity: item.severity,
+      })),
+      regex_rules: resourceBundle.regexRules.map((item) => ({
+        id: item.id,
+        name: item.name,
+        pattern: item.pattern,
+        flags: item.flags,
+        severity: item.severity,
+      })),
+      confirmed_references: [
+        ...chapterReferences.references.characters
+          .filter((item: any) => item.state === "confirmed")
+          .map((item: any) => ({ type: "character", name: item.resource?.name ?? "" })),
+        ...chapterReferences.references.glossary
+          .filter((item: any) => item.state === "confirmed")
+          .map((item: any) => ({ type: "glossary", name: item.resource?.term ?? item.resource?.canonical_form ?? "" })),
+      ],
     });
 
     const saved = await this.prisma.consistencyReport.create({
@@ -1198,7 +1796,84 @@ export class GenerationService {
     return { report, saved };
   }
 
-  async generate(chapterId: string, stage: Exclude<Stage, "fix">, dto: GenerateStageDto, idempotencyKey?: string) {
+  async previewPrompt(args: {
+    chapterId: string;
+    stage: Stage;
+    promptTemplateVersionId?: string;
+    promptVersion?: number;
+    platformVariant?: string;
+    stylePresetName?: string;
+    instruction?: string;
+  }) {
+    const { chapter, project } = await this.resolveChapter(args.chapterId);
+    const k = 50;
+    const retrieved = await this.retrieveMemory(chapter, [], k);
+    const assembled = buildGenerationContext({ k, retrieved });
+    const baseInput = args.stage === "fix" ? null : await this.resolveBaseInput(chapter.id, args.stage);
+    const latestVersion =
+      args.stage === "fix"
+        ? await this.prisma.chapterVersion.findFirst({
+            where: { chapter_id: chapter.id },
+            orderBy: { version_no: "desc" },
+          })
+        : null;
+    const fixContext =
+      args.stage === "fix" && latestVersion
+        ? {
+            request: fixRequestSchema.parse({
+              base_version_id: latestVersion.id,
+              mode: "replace_span",
+              span: { from: 0, to: Math.min(320, latestVersion.text.length) },
+              issue_type: "prompt_preview",
+              strategy_id: "prompt-preview",
+              instruction: args.instruction ?? "只读预览当前修复 prompt。",
+            }),
+            beforeText: "",
+            targetText: latestVersion.text.slice(0, Math.min(320, latestVersion.text.length)),
+            afterText: latestVersion.text.slice(Math.min(320, latestVersion.text.length)),
+            baseVersionId: latestVersion.id,
+            numericAnchors: extractNumericAnchors(latestVersion.text),
+          }
+        : undefined;
+
+    const promptTrace = await this.buildPromptRuntime({
+      stage: args.stage,
+      chapter,
+      project,
+      context: assembled.context,
+      instruction: args.instruction,
+      baseInput,
+      runtimeOptions: {
+        promptTemplateVersionId: args.promptTemplateVersionId,
+        promptVersion: args.promptVersion,
+        platformVariant: args.platformVariant,
+        stylePresetName: args.stylePresetName,
+      },
+      fixContext,
+    });
+
+    return {
+      stage: args.stage,
+      prompt_name: promptTrace.promptName,
+      prompt_version: promptTrace.promptVersionLabel,
+      prompt_template_version_id: promptTrace.promptTemplateVersionId ?? null,
+      platform_variant: promptTrace.platformVariant,
+      style_preset_name: promptTrace.stylePresetName,
+      source: promptTrace.source,
+      system: promptTrace.system,
+      user: promptTrace.user,
+      input_summary: promptTrace.inputSummary,
+      context_hash: assembled.contextHash,
+    };
+  }
+
+  async generate(
+    chapterId: string,
+    stage: Exclude<Stage, "fix">,
+    dto: GenerateStageDto,
+    idempotencyKey?: string,
+    runtimeOptions?: RuntimePromptOptions,
+  ) {
     const idemKey = this.requireIdempotencyKey(idempotencyKey);
     const stageEnum = normalizeStage(stage);
     const reqHash = this.requestHash(stage, dto);
@@ -1219,7 +1894,7 @@ export class GenerationService {
     }
 
     try {
-      const { chapter } = await this.resolveChapter(chapterId);
+      const { chapter, project } = await this.resolveChapter(chapterId);
       const k = dto.k ?? 50;
       const retrieved = await this.retrieveMemory(chapter, dto.query_entities ?? [], k);
       const assembled = buildGenerationContext({ k, retrieved });
@@ -1242,7 +1917,23 @@ export class GenerationService {
       });
 
       const baseInput = await this.resolveBaseInput(chapter.id, stage);
-      let generatedText = await this.generateText(stage, chapter, assembled.context, dto.instruction, baseInput);
+      const mergedRuntimeOptions: RuntimePromptOptions = {
+        promptTemplateVersionId: dto.prompt_template_version_id,
+        platformVariant: dto.platform_variant,
+        stylePresetName: dto.style_preset_name,
+        retrieverStrategy: "hybrid-sql-v1",
+        ...runtimeOptions,
+      };
+      const generated = await this.generateText({
+        stage,
+        chapter,
+        project,
+        context: assembled.context,
+        instruction: dto.instruction,
+        baseInput,
+        runtimeOptions: mergedRuntimeOptions,
+      });
+      let generatedText = generated.text;
       if (stage === "draft" || stage === "polish") {
         generatedText = await this.normalizeDraftPolishLengthAndStyle({
           stage,
@@ -1264,13 +1955,19 @@ export class GenerationService {
         text: generatedText,
         parentVersionId: latestVersion?.id,
         meta: {
+          source_stage: stage,
+          prompt_template_version: generated.promptTrace.promptVersionLabel,
+          prompt_template_version_id: generated.promptTrace.promptTemplateVersionId ?? null,
+          prompt_name: generated.promptTrace.promptName,
+          prompt_version_label: generated.promptTrace.promptVersionLabel,
+          platform_variant: generated.promptTrace.platformVariant,
+          prompt_source: generated.promptTrace.source,
           provider: this.provider?.name ?? "mock",
-          model:
-            stage === "beats"
-              ? this.modelConfig.beats
-              : stage === "draft"
-                ? this.modelConfig.draft
-                : this.modelConfig.polish,
+          model: generated.model,
+          style_preset: generated.promptTrace.stylePresetName ?? project.target_platform ?? null,
+          style_preset_name: generated.promptTrace.stylePresetName ?? project.target_platform ?? null,
+          quality_score: null,
+          manual_accepted: false,
           idempotency_key: idemKey,
           context_hash: assembled.contextHash,
           base_version_id: baseInput?.versionId ?? null,
@@ -1281,7 +1978,39 @@ export class GenerationService {
 
       const extracted = await this.extractMemoryText(generatedText);
       await this.saveExtractedMemory({ chapter, version, extracted });
+      await this.storyReferenceService.rebuildChapterReferences(chapter.project_id, chapter.id, {
+        versionId: version.id,
+        origin: ResourceReferenceOrigin.generation,
+      });
       const continuity = await this.runAndPersistContinuity({ chapter, version });
+      await this.recordAgentRun({
+        runId: requestState.request.id,
+        projectId: project.id,
+        chapterId: chapter.id,
+        versionId: version.id,
+        stage,
+        promptName: generated.promptTrace.promptName,
+        promptVersionLabel: generated.promptTrace.promptVersionLabel,
+        promptTemplateVersionId: generated.promptTrace.promptTemplateVersionId,
+        platformVariant: generated.promptTrace.platformVariant,
+        model: generated.model,
+        stylePreset: generated.promptTrace.stylePresetName ?? project.target_platform,
+        retrieverStrategy: "hybrid-sql-v1",
+        contextHash: assembled.contextHash,
+        inputPayload: {
+          instruction: dto.instruction,
+          query_entities: dto.query_entities ?? [],
+          k,
+          idempotency_key: idemKey,
+          prompt_input_summary: generated.promptTrace.inputSummary,
+          prompt_source: generated.promptTrace.source,
+        },
+        outputPayload: {
+          version_id: version.id,
+          continuity_report_id: continuity.saved.id,
+          prompt_version_label: generated.promptTrace.promptVersionLabel,
+        },
+      });
       await this.markRequestSucceeded(requestState.request.id, version.id, continuity.saved.id);
 
       return {
@@ -1350,6 +2079,137 @@ export class GenerationService {
     return { from: target.anchor_span.from, to: target.anchor_span.to };
   }
 
+  private extractPreviewTokens(text: string, limit = 24) {
+    const matches = text.match(/[\u4e00-\u9fa5A-Za-z0-9]{2,}/g) ?? [];
+    const unique: string[] = [];
+    for (const token of matches) {
+      const normalized = token.trim();
+      if (!normalized || unique.includes(normalized)) {
+        continue;
+      }
+      unique.push(normalized);
+      if (unique.length >= limit) {
+        break;
+      }
+    }
+    return unique;
+  }
+
+  private inferPreviewRisk(mode: FixRequest["mode"], impactRatio: number) {
+    if (mode === "rewrite_chapter") {
+      return "high" as const;
+    }
+    if (mode === "rewrite_section") {
+      return impactRatio > 0.5 ? ("high" as const) : ("medium" as const);
+    }
+    if (impactRatio > 0.2) {
+      return "medium" as const;
+    }
+    return "low" as const;
+  }
+
+  async previewFix(chapterId: string, payload: unknown) {
+    const request = fixRequestSchema.parse(payload);
+    const { chapter } = await this.resolveChapter(chapterId);
+
+    const baseVersion = await this.prisma.chapterVersion.findFirst({
+      where: { id: request.base_version_id, chapter_id: chapterId },
+    });
+    if (!baseVersion) {
+      throw new NotFoundException("Base version not found");
+    }
+
+    const latestMemory = await this.prisma.chapterMemory.findFirst({
+      where: { chapter_id: chapterId },
+      orderBy: { created_at: "desc" },
+    });
+
+    const targetSpan = this.resolveTargetSpan(baseVersion, request.mode, request, latestMemory?.scene_list);
+    const targetText = baseVersion.text.slice(targetSpan.from, targetSpan.to);
+    const targetChars = targetText.length;
+    const chapterChars = Math.max(baseVersion.text.length, 1);
+    const impactRatio = Number((targetChars / chapterChars).toFixed(4));
+    const riskLevel = this.inferPreviewRisk(request.mode, impactRatio);
+    const tokens = this.extractPreviewTokens(targetText);
+
+    const [characters, seeds, facts] = await Promise.all([
+      this.prisma.character.findMany({
+        where: { project_id: chapter.project_id },
+        select: { id: true, name: true },
+        take: 100,
+      }),
+      this.prisma.seed.findMany({
+        where: { project_id: chapter.project_id },
+        orderBy: { planted_chapter_no: "desc" },
+        select: { id: true, content: true, status: true, planted_chapter_no: true },
+        take: 120,
+      }),
+      this.prisma.fact.findMany({
+        where: { project_id: chapter.project_id },
+        orderBy: { chapter_no: "desc" },
+        select: { id: true, content: true, chapter_no: true },
+        take: 120,
+      }),
+    ]);
+
+    const touchesToken = (content: string) => tokens.some((token) => content.includes(token));
+    const touchedCharacters = characters
+      .filter((character) => targetText.includes(character.name))
+      .map((character) => character.name)
+      .slice(0, 12);
+    const touchedSeeds = seeds
+      .filter((seed) => touchesToken(seed.content))
+      .map((seed) => ({
+        id: seed.id,
+        status: seed.status,
+        planted_chapter_no: seed.planted_chapter_no,
+        content: seed.content.slice(0, 60),
+      }))
+      .slice(0, 8);
+    const touchedFacts = facts
+      .filter((fact) => touchesToken(fact.content))
+      .map((fact) => ({
+        id: fact.id,
+        chapter_no: fact.chapter_no,
+        content: fact.content.slice(0, 60),
+      }))
+      .slice(0, 8);
+
+    const estimatedOperation =
+      request.mode === "replace_span"
+        ? "仅替换选定片段，正文其他部分保持不变"
+        : request.mode === "rewrite_section"
+          ? "重写场景级片段，可能影响该场景的对话与节奏"
+          : "重写整章，改动范围最大";
+
+    const suggestion =
+      request.mode === "replace_span"
+        ? "建议先执行低强度修复，修复后立即复评。"
+        : request.mode === "rewrite_section"
+          ? "建议锁定角色口吻与伏笔，避免场景重写扩散。"
+          : "建议先备份当前版本并记录禁止改动项。";
+
+    return {
+      preview_id: randomUUID(),
+      chapter_id: chapter.id,
+      base_version_id: baseVersion.id,
+      mode: request.mode,
+      target_span: targetSpan,
+      target_chars: targetChars,
+      chapter_chars: chapterChars,
+      impact_ratio: impactRatio,
+      risk_level: riskLevel,
+      estimated_operation: estimatedOperation,
+      fix_instruction: request.instruction ?? null,
+      touched_entities: {
+        characters: touchedCharacters,
+        seeds: touchedSeeds,
+        facts: touchedFacts,
+      },
+      suggestion,
+    };
+  }
+
   async fix(chapterId: string, payload: unknown, idempotencyKey?: string) {
     const idemKey = this.requireIdempotencyKey(idempotencyKey);
     const request = fixRequestSchema.parse(payload);
@@ -1391,7 +2251,7 @@ export class GenerationService {
     }
 
     try {
-      const { chapter } = await this.resolveChapter(chapterId);
+      const { chapter, project } = await this.resolveChapter(chapterId);
 
       const baseVersion = await this.prisma.chapterVersion.findFirst({
         where: { id: request.base_version_id, chapter_id: chapterId },
@@ -1426,21 +2286,38 @@ export class GenerationService {
         },
       });
 
-      const replacement = await this.generateText(
-        "fix",
+      const fixInstruction = [
+        `修复模式: ${request.mode}`,
+        request.strategy_id ? `strategy_id: ${request.strategy_id}` : "",
+        request.issue_ids?.length ? `issue_ids: ${request.issue_ids.join(",")}` : "",
+        request.instruction ? `instruction: ${request.instruction}` : "",
+        "待修复片段:",
+        target,
+      ]
+        .filter(Boolean)
+        .join("\n");
+      const generated = await this.generateText({
+        stage: "fix",
         chapter,
-        assembled.context,
-        [
-          `修复模式: ${request.mode}`,
-          request.strategy_id ? `strategy_id: ${request.strategy_id}` : "",
-          request.issue_ids?.length ? `issue_ids: ${request.issue_ids.join(",")}` : "",
-          request.instruction ? `instruction: ${request.instruction}` : "",
-          "待修复片段:",
-          target,
-        ]
-          .filter(Boolean)
-          .join("\n"),
-      );
+        project,
+        context: assembled.context,
+        instruction: fixInstruction,
+        runtimeOptions: {
+          promptTemplateVersionId: request.prompt_template_version_id,
+          platformVariant: request.platform_variant,
+          stylePresetName: request.style_preset_name,
+          retrieverStrategy: "hybrid-sql-v1",
+        },
+        fixContext: {
+          request,
+          beforeText: before,
+          targetText: target,
+          afterText: after,
+          baseVersionId: baseVersion.id,
+          numericAnchors: extractNumericAnchors(baseVersion.text),
+        },
+      });
+      const replacement = generated.text;
 
       let newText = `${before}${replacement}${after}`;
       if (this.shouldRunRepetitionFixLoop(request)) {
@@ -1469,18 +2346,64 @@ export class GenerationService {
         text: newText,
         parentVersionId: baseVersion.id,
         meta: {
+          source_stage: "fix",
+          prompt_template_version: generated.promptTrace.promptVersionLabel,
+          prompt_template_version_id: generated.promptTrace.promptTemplateVersionId ?? null,
+          prompt_name: generated.promptTrace.promptName,
+          prompt_version_label: generated.promptTrace.promptVersionLabel,
+          platform_variant: generated.promptTrace.platformVariant,
+          prompt_source: generated.promptTrace.source,
+          model: generated.model,
+          style_preset: generated.promptTrace.stylePresetName ?? project.target_platform ?? null,
+          style_preset_name: generated.promptTrace.stylePresetName ?? project.target_platform ?? null,
+          quality_score: null,
+          manual_accepted: false,
           mode: request.mode,
           base_version_id: baseVersion.id,
           idempotency_key: idemKey,
           strategy_id: request.strategy_id,
           issue_ids: request.issue_ids,
+          instruction: request.instruction ?? null,
           patch,
         },
       });
 
       const extracted = await this.extractMemoryText(newText);
       await this.saveExtractedMemory({ chapter, version, extracted });
+      await this.storyReferenceService.rebuildChapterReferences(chapter.project_id, chapter.id, {
+        versionId: version.id,
+        origin: ResourceReferenceOrigin.generation,
+      });
       const continuity = await this.runAndPersistContinuity({ chapter, version });
+      await this.recordAgentRun({
+        runId: requestState.request.id,
+        projectId: project.id,
+        chapterId: chapter.id,
+        versionId: version.id,
+        stage: "fix",
+        promptName: generated.promptTrace.promptName,
+        promptVersionLabel: generated.promptTrace.promptVersionLabel,
+        promptTemplateVersionId: generated.promptTrace.promptTemplateVersionId,
+        platformVariant: generated.promptTrace.platformVariant,
+        model: generated.model,
+        stylePreset: generated.promptTrace.stylePresetName ?? project.target_platform,
+        retrieverStrategy: "hybrid-sql-v1",
+        contextHash: assembled.contextHash,
+        inputPayload: {
+          mode: request.mode,
+          issue_ids: request.issue_ids ?? [],
+          strategy_id: request.strategy_id ?? null,
+          instruction: request.instruction ?? null,
+          prompt_input_summary: generated.promptTrace.inputSummary,
+          prompt_source: generated.promptTrace.source,
+        },
+        outputPayload: {
+          new_version_id: version.id,
+          continuity_report_id: continuity.saved.id,
+          fix_mode: request.mode,
+          prompt_version_label: generated.promptTrace.promptVersionLabel,
+        },
+      });
       await this.markRequestSucceeded(requestState.request.id, version.id, continuity.saved.id);
 
       return fixResponseSchema.parse({

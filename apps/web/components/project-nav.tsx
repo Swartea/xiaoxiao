@@ -5,9 +5,14 @@ export function ProjectNav({ id }: { id: string }) {
     { href: "/projects", label: "全部作品" },
     { href: `/projects/${id}/dashboard`, label: "仪表盘" },
     { href: `/projects/${id}/bible`, label: "故事设定" },
+    { href: `/projects/${id}/characters`, label: "人物图谱" },
+    { href: `/projects/${id}/glossary`, label: "术语库" },
+    { href: `/projects/${id}/timeline`, label: "时间线" },
+    { href: `/projects/${id}/relationships`, label: "关系图谱" },
+    { href: `/projects/${id}/rules`, label: "规则库" },
     { href: `/projects/${id}/outline`, label: "章节大纲" },
     { href: `/projects/${id}/chapters`, label: "章节管理" },
-    { href: `/projects/${id}/characters`, label: "人物关系" },
+    { href: `/projects/${id}/prompts`, label: "Prompt Studio" },
   ];
 
   return (

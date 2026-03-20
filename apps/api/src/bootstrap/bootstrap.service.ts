@@ -15,7 +15,7 @@ import { BibleService } from "../bible/bible.service";
 import { ChaptersService } from "../chapters/chapters.service";
 import { GenerationService } from "../generation/generation.service";
 import { OutlineService } from "../outline/outline.service";
-import { BootstrapProjectDto } from "./dto";
+import { BootstrapLoglineOptionsDto, BootstrapProjectDto } from "./dto";
 
 const bootstrapBibleSchema = z.object({
   characters: z
@@ -77,8 +77,30 @@ const outlineSchema = z.object({
     .max(5),
 });
 
-function normalizeJson<T extends Record<string, unknown>>(value: T): Prisma.InputJsonObject {
-  return value as unknown as Prisma.InputJsonObject;
+const loglineOptionsSchema = z.object({
+  options: z.array(z.string().min(12).max(180)).min(4).max(6),
+});
+
+function normalizeJson<T>(value: T): Prisma.InputJsonValue {
+  return value as unknown as Prisma.InputJsonValue;
+}
+
+function uniqueStrings(values: Array<string | null | undefined>, limit = 6) {
+  const result: string[] = [];
+  for (const value of values) {
+    if (typeof value !== "string") {
+      continue;
+    }
+    const normalized = value.replace(/\s+/g, " ").trim();
+    if (!normalized || result.includes(normalized)) {
+      continue;
+    }
+    result.push(normalized);
+    if (result.length >= limit) {
+      break;
+    }
+  }
+  return result;
 }
 
 @Injectable()
@@ -136,6 +158,34 @@ export class BootstrapService {
   private fallbackCharacterName(brief: string) {
     const first = brief.split(/[，,。\n]/)[0]?.trim();
     return first && first.length <= 20 ? first : "主角";
+  }
+
+  private fallbackLoglineSubject(projectTitle: string, protagonistBrief?: string) {
+    const protagonist = this.fallbackCharacterName(protagonistBrief ?? "");
+    if (protagonist !== "主角") {
+      return protagonist;
+    }
+    const projectHead = projectTitle.split(/[\s:：\-]/)[0]?.trim();
+    return projectHead && projectHead.length <= 12 ? `${projectHead}中的主角` : "一个被逼到绝境的人";
+  }
+
+  private fallbackLoglineOptions(
+    project: { title: string; genre: string | null; target_platform: string | null },
+    dto: BootstrapLoglineOptionsDto,
+  ) {
+    const tone = dto.tone_setting?.trim() || project.genre || "悬念";
+    const protagonist = this.fallbackLoglineSubject(project.title, dto.protagonist_brief);
+    const seed = dto.seed_logline?.trim();
+    const baseOptions = [
+      `${protagonist}在一场${tone}风暴的前夜发现自己正被推向祭台，他若不先下手为强，就会成为局里第一个被牺牲的人。`,
+      `${protagonist}原以为自己只是局外人，却在${tone}秩序崩裂的那一夜被迫做出选择：要么吞下真相，要么亲手掀翻整个棋盘。`,
+      `${protagonist}在最不该知道真相的时候看见了禁忌的一角，而这份发现会让他失去现在拥有的一切。`,
+      `${protagonist}被卷入一场只准赢家活下来的${tone}游戏，他若不能抢先识破规则，就会连名字都被抹掉。`,
+      `${protagonist}以为自己还能退后一步，可当局势第一次失控时，他必须主动出手，否则代价会落到最不该受伤的人身上。`,
+      `${protagonist}发现自己从来不是故事的旁观者，而是那场${tone}清算里最关键、也最危险的一枚活棋。`,
+    ];
+
+    return uniqueStrings(seed ? [seed, ...baseOptions] : baseOptions, 6).slice(0, 6);
   }
 
   private fallbackBibleDraft(dto: BootstrapProjectDto) {
@@ -212,6 +262,88 @@ export class BootstrapService {
     };
   }
 
+  private outlineFromVolumePlan(dto: BootstrapProjectDto) {
+    const plan = dto.selected_volume_plan;
+    if (!plan) {
+      return null;
+    }
+
+    const chapterSummary = plan.chapter_missions
+      .map((mission) => `第${mission.chapter_no}章 ${mission.title}：${mission.mission}`)
+      .join(" ");
+
+    return {
+      nodes: [
+        {
+          phase_no: 1,
+          title: plan.volume_title,
+          summary: chapterSummary,
+          goal: plan.main_objective,
+          conflict: plan.antagonist_force,
+          milestone_chapter_no: 1,
+        },
+        {
+          phase_no: 2,
+          title: "谜团加压",
+          summary: `围绕“${plan.central_mystery}”持续推进调查与反制。`,
+          goal: "逼近真正的敌人与规则",
+          conflict: plan.antagonist_force,
+          milestone_chapter_no: 3,
+        },
+        {
+          phase_no: 3,
+          title: "第一次转折",
+          summary: plan.first_turning_point,
+          goal: "改写主角原本的阶段目标",
+          conflict: plan.antagonist_force,
+          milestone_chapter_no: 5,
+        },
+      ],
+    };
+  }
+
+  private async persistStoryBlueprint(
+    project: { id: string; title: string; genre: string | null; target_platform: string | null },
+    dto: BootstrapProjectDto,
+  ) {
+    if (!dto.selected_volume_plan && !dto.selected_title && !dto.genre && !(dto.tropes?.length ?? 0)) {
+      return;
+    }
+
+    const latest = await this.prisma.storyBlueprint.findFirst({
+      where: { project_id: project.id },
+      orderBy: { version_no: "desc" },
+    });
+
+    await this.prisma.storyBlueprint.create({
+      data: {
+        project_id: project.id,
+        version_no: (latest?.version_no ?? 0) + 1,
+        book_positioning: [dto.genre, dto.sub_genre].filter(Boolean).join(" / ") || project.title,
+        genre: dto.genre ?? project.genre ?? "未设定",
+        selling_points: dto.tropes ?? [],
+        target_platform: project.target_platform ?? "webnovel",
+        target_readers: "网文读者",
+        pleasure_pacing: dto.selected_volume_plan
+          ? `前五章任务：${dto.selected_volume_plan.chapter_missions.map((mission) => mission.title).join(" / ")}`
+          : "每章推进 + 章节尾钩",
+        main_conflict: dto.logline,
+        core_suspense: dto.selected_volume_plan?.central_mystery ?? dto.story_seed ?? "核心悬念待补全",
+        character_relation_map: normalizeJson({
+          protagonist_template: dto.protagonist_template ?? null,
+        }),
+        world_rule_map: normalizeJson({
+          genre: dto.genre ?? null,
+          sub_genre: dto.sub_genre ?? null,
+          story_seed: dto.story_seed ?? null,
+          tone_setting: dto.tone_setting,
+        }),
+        volume_structure: normalizeJson(dto.selected_volume_plan ? [dto.selected_volume_plan] : []),
+        chapter_targets: normalizeJson(dto.selected_volume_plan?.chapter_missions ?? []),
+      },
+    });
+  }
+
   private async generateBibleDraft(dto: BootstrapProjectDto) {
     if (!this.provider) {
       return this.fallbackBibleDraft(dto);
@@ -230,6 +362,11 @@ export class BootstrapService {
           `logline: ${dto.logline}`,
           `protagonist_brief: ${dto.protagonist_brief}`,
           `tone_setting: ${dto.tone_setting}`,
+          dto.genre ? `genre: ${dto.genre}` : "",
+          dto.sub_genre ? `sub_genre: ${dto.sub_genre}` : "",
+          dto.tropes?.length ? `tropes: ${dto.tropes.join(" / ")}` : "",
+          dto.story_seed ? `story_seed: ${dto.story_seed}` : "",
+          dto.selected_title ? `selected_title: ${dto.selected_title}` : "",
         ].join("\n\n"),
         schema: bootstrapBibleSchema,
         temperature: 0.4,
@@ -246,6 +383,11 @@ export class BootstrapService {
   }
 
   private async generateOutline(dto: BootstrapProjectDto, bibleDraft: z.infer<typeof bootstrapBibleSchema>) {
+    const planOutline = this.outlineFromVolumePlan(dto);
+    if (planOutline) {
+      return planOutline;
+    }
+
     if (!this.provider) {
       return this.fallbackOutline(dto);
     }
@@ -261,6 +403,10 @@ export class BootstrapService {
           `logline: ${dto.logline}`,
           `protagonist: ${protagonist}`,
           `tone_setting: ${dto.tone_setting}`,
+          dto.genre ? `genre: ${dto.genre}` : "",
+          dto.sub_genre ? `sub_genre: ${dto.sub_genre}` : "",
+          dto.story_seed ? `story_seed: ${dto.story_seed}` : "",
+          dto.selected_volume_plan ? `volume_plan: ${JSON.stringify(dto.selected_volume_plan)}` : "",
         ].join("\n\n"),
         schema: outlineSchema,
         temperature: 0.5,
@@ -274,6 +420,62 @@ export class BootstrapService {
     } catch {
       return this.fallbackOutline(dto);
     }
+  }
+
+  async generateLoglineOptions(projectId: string, dto: BootstrapLoglineOptionsDto) {
+    const project = await this.ensureProject(projectId);
+    const toneSetting = dto.tone_setting?.trim() || project.genre || project.target_platform || "权谋";
+    const protagonistBrief = dto.protagonist_brief?.trim() || "";
+    const seedLogline = dto.seed_logline?.trim() || "";
+
+    if (!this.provider) {
+      return {
+        fallback: true,
+        options: this.fallbackLoglineOptions(project, dto),
+      };
+    }
+
+    try {
+      const result = await this.provider.generateText({
+        model: this.model,
+        system: [
+          "你是 StoryOS 的故事开局策划助手。",
+          "你要生成 4-6 条可直接作为小说 logline 的候选。",
+          "每条都要是一句话，强调主角、压力、行动目标和失败代价。",
+          "不同候选要有明显差异：有的更偏人物困境，有的更偏悬念，有的更偏世界规则。",
+          "输出严格 JSON，不要输出 Markdown。",
+        ].join("\n"),
+        user: [
+          `project_title: ${project.title}`,
+          `genre: ${project.genre ?? ""}`,
+          `target_platform: ${project.target_platform ?? ""}`,
+          `tone_setting: ${toneSetting}`,
+          `protagonist_brief: ${protagonistBrief}`,
+          seedLogline ? `seed_logline: ${seedLogline}` : "",
+          "请生成 4-6 条候选 logline，中文输出，尽量短、狠、清晰。",
+        ]
+          .filter(Boolean)
+          .join("\n\n"),
+        schema: loglineOptionsSchema,
+        temperature: 0.9,
+        maxTokens: 1200,
+      });
+
+      const options = uniqueStrings(result.parsed?.options ?? [], 6);
+      if (options.length >= 4) {
+        return {
+          fallback: false,
+          options,
+        };
+      }
+    } catch {
+      // Fall through to deterministic fallback options.
+    }
+
+    return {
+      fallback: true,
+      options: this.fallbackLoglineOptions(project, dto),
+    };
   }
 
   private async loadOrCreateRequest(args: {
@@ -348,7 +550,7 @@ export class BootstrapService {
   }
 
   async bootstrapProject(projectId: string, dto: BootstrapProjectDto, idempotencyKey?: string) {
-    await this.ensureProject(projectId);
+    const project = await this.ensureProject(projectId);
 
     const idemKey = this.requireIdempotencyKey(idempotencyKey);
     const reqHash = this.requestHash(dto);
@@ -370,6 +572,16 @@ export class BootstrapService {
     }
 
     try {
+      if (dto.selected_title?.trim() || dto.genre?.trim()) {
+        await this.prisma.project.update({
+          where: { id: projectId },
+          data: {
+            title: dto.selected_title?.trim() || undefined,
+            genre: dto.genre?.trim() || undefined,
+          },
+        });
+      }
+
       const bibleDraft = await this.generateBibleDraft(dto);
 
       await this.bibleService.patchBible(projectId, {
@@ -414,17 +626,21 @@ export class BootstrapService {
         })),
       });
 
-      const firstNode = outline[0];
       let chapter = await this.prisma.chapter.findFirst({
         where: { project_id: projectId, chapter_no: 1 },
       });
 
+      const firstMission = dto.selected_volume_plan?.chapter_missions[0];
+      const firstChapterTitle = firstMission?.title ?? outline[0]?.title ?? "第一章";
+      const firstChapterGoal = firstMission?.mission ?? outline[0]?.goal ?? outline[0]?.summary ?? dto.logline;
+      const firstChapterConflict = dto.selected_volume_plan?.antagonist_force ?? outline[0]?.conflict ?? "开局冲突待推进";
+
       if (!chapter) {
         chapter = await this.chaptersService.createChapter(projectId, {
           chapter_no: 1,
-          title: firstNode?.title ?? "第一章",
-          goal: firstNode?.goal ?? firstNode?.summary ?? dto.logline,
-          conflict: firstNode?.conflict ?? "开局冲突待推进",
+          title: firstChapterTitle,
+          goal: firstChapterGoal,
+          conflict: firstChapterConflict,
           twist: undefined,
           cliffhanger: undefined,
           word_target: 4000,
@@ -444,6 +660,14 @@ export class BootstrapService {
             `logline: ${dto.logline}`,
             `tone_setting: ${dto.tone_setting}`,
             `protagonist_brief: ${dto.protagonist_brief}`,
+            dto.selected_title ? `selected_title: ${dto.selected_title}` : "",
+            dto.genre ? `genre: ${dto.genre}` : "",
+            dto.sub_genre ? `sub_genre: ${dto.sub_genre}` : "",
+            dto.tropes?.length ? `tropes: ${dto.tropes.join(" / ")}` : "",
+            dto.story_seed ? `story_seed: ${dto.story_seed}` : "",
+            dto.selected_volume_plan?.chapter_missions[0]
+              ? `chapter_1_mission: ${dto.selected_volume_plan.chapter_missions[0].mission}`
+              : "",
           ].join("\n"),
         },
         `${idemKey}:bootstrap:beats`,
@@ -452,10 +676,13 @@ export class BootstrapService {
       await this.prisma.chapter.update({
         where: { id: chapter.id },
         data: {
-          goal: firstNode?.goal ?? chapter.goal,
-          conflict: firstNode?.conflict ?? chapter.conflict,
+          title: firstChapterTitle,
+          goal: firstChapterGoal,
+          conflict: firstChapterConflict,
         },
       });
+
+      await this.persistStoryBlueprint(project, dto);
 
       await this.markRequestSucceeded(requestState.request.id, chapter.id, chapter.chapter_no);
 

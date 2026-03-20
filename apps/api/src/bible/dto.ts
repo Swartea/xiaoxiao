@@ -1,5 +1,6 @@
 import {
   IsArray,
+  IsEnum,
   IsInt,
   IsObject,
   IsOptional,
@@ -10,6 +11,7 @@ import {
   ValidateNested,
 } from "class-validator";
 import { Type } from "class-transformer";
+import { RelationType } from "@prisma/client";
 
 export class CreateCharacterDto {
   @IsString()
@@ -71,8 +73,8 @@ export class CreateRelationshipDto {
   @IsUUID()
   to_character_id!: string;
 
-  @IsString()
-  relation_type!: string;
+  @IsEnum(RelationType)
+  relation_type!: RelationType;
 
   @IsInt()
   @Min(0)

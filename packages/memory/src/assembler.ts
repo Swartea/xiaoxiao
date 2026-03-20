@@ -25,10 +25,32 @@ export function buildGenerationContext(input: AssemblerInput): AssemblerOutput {
   const facts = pickTop(dedupeByEntityAndContent(input.retrieved.facts), factsQuota);
   const seeds = pickTop(dedupeByEntityAndContent(input.retrieved.seeds), seedsQuota);
   const timeline = pickTop(dedupeByEntityAndContent(input.retrieved.timeline), timelineQuota);
+  const sensitiveWords = pickTop(input.retrieved.sensitiveWords, Math.max(5, scaleQuota(8, k)));
+  const regexRules = pickTop(input.retrieved.regexRules, Math.max(5, scaleQuota(8, k)));
 
   const constraints = [
     ...bibleRules.map((i) => i.data.text),
     ...glossary.map((i) => `术语统一: ${i.data.term} -> ${i.data.canonical_form}`),
+    ...sensitiveWords.map((i) =>
+      i.data.replacement
+        ? `敏感词规避: ${i.data.term} -> ${i.data.replacement}`
+        : `敏感词规避: 避免使用 ${i.data.term}`,
+    ),
+    ...regexRules.map((i) => `文本规则: ${i.data.name} /${i.data.pattern}/${i.data.flags ?? ""}`),
+  ];
+  const safety_rules = [
+    ...sensitiveWords.map((item) => ({
+      kind: "sensitive_word",
+      label: item.data.term,
+      value: item.data.replacement ? `${item.data.term} -> ${item.data.replacement}` : item.data.term,
+      severity: item.data.severity,
+    })),
+    ...regexRules.map((item) => ({
+      kind: "regex_rule",
+      label: item.data.name,
+      value: `/${item.data.pattern}/${item.data.flags ?? ""}`,
+      severity: item.data.severity,
+    })),
   ];
 
   const bibleSummary = [
@@ -36,6 +58,11 @@ export function buildGenerationContext(input: AssemblerInput): AssemblerOutput {
     ...bibleRules.map((r) => `- ${r.data.text}`),
     "术语摘要:",
     ...glossary.map((g) => `- ${g.data.term}: ${g.data.canonical_form}`),
+    "安全规则摘要:",
+    ...sensitiveWords.map((item) =>
+      `- 敏感词 ${item.data.term}${item.data.replacement ? ` => ${item.data.replacement}` : ""}`,
+    ),
+    ...regexRules.map((item) => `- 规则 ${item.data.name}: /${item.data.pattern}/${item.data.flags ?? ""}`),
   ].join("\n");
 
   const trace_map = [
@@ -60,6 +87,8 @@ export function buildGenerationContext(input: AssemblerInput): AssemblerOutput {
   const context = {
     bible_summary: bibleSummary,
     constraints,
+    safety_rules,
+    referenced_resources: input.retrieved.referencedResources,
     recent_chapter_summaries: recentSummaries.map((item) => ({
       chapter_no: item.data.chapter_no,
       summary: item.data.summary,

@@ -41,6 +41,28 @@ enum RelationType {
   unknown
 }
 
+enum ResourceType {
+  character
+  glossary
+  sensitive_word
+  regex_rule
+  timeline_event
+  relationship
+}
+
+enum ResourceReferenceState {
+  inferred
+  confirmed
+  ignored
+}
+
+enum ResourceReferenceOrigin {
+  migration
+  extractor
+  generation
+  manual
+}
+
 enum SeedStatus {
   planted
   in_progress
@@ -66,41 +88,119 @@ enum GenerationRequestStatus {
   failed
 }
 
+enum PromptTemplateStatus {
+  draft
+  active
+  archived
+}
+
+enum PromptTemplateStage {
+  beats
+  draft
+  polish
+  quality_eval
+  fix
+  director
+  adaptation
+}
+
+enum FixTaskStatus {
+  pending
+  applied
+  skipped
+  failed
+}
+
+enum DirectorDecision {
+  accept
+  fix
+  regenerate
+}
+
+enum ExperimentType {
+  prompt_ab
+  model_compare
+  retriever_compare
+}
+
+enum ExperimentStatus {
+  pending
+  running
+  completed
+  failed
+}
+
+enum AdaptationType {
+  script
+  storyboard
+  short_drama
+  character_card
+  scene_card
+}
+
 model Project {
-  id              String          @id @default(uuid()) @db.Uuid
+  id              String   @id @default(uuid()) @db.Uuid
   title           String
   genre           String?
   target_platform String?
-  pov             Pov             @default(third)
-  tense           Tense           @default(past)
-  style_preset_id String?         @db.Uuid
-  created_at      DateTime        @default(now())
-  updated_at      DateTime        @updatedAt
+  pov             Pov      @default(third)
+  tense           Tense    @default(past)
+  style_preset_id String?  @db.Uuid
+  created_at      DateTime @default(now())
+  updated_at      DateTime @updatedAt
 
-  stylePreset   StylePreset?               @relation(fields: [style_preset_id], references: [id])
-  characters    Character[]
-  relationships Relationship[]
-  bibleEntities BibleEntity[]
-  glossaryTerms GlossaryTerm[]
-  chapters      Chapter[]
-  outlineNodes  StoryOutlineNode[]
-  facts         Fact[]
-  seeds         Seed[]
-  timeline      TimelineEvent[]
-  bootstrapRequests BootstrapRequest[]
+  stylePreset            StylePreset?            @relation(fields: [style_preset_id], references: [id])
+  characters             Character[]
+  relationships          Relationship[]
+  bibleEntities          BibleEntity[]
+  glossaryTerms          GlossaryTerm[]
+  sensitiveWords         SensitiveWord[]
+  regexRules             RegexRule[]
+  chapters               Chapter[]
+  outlineNodes           StoryOutlineNode[]
+  facts                  Fact[]
+  seeds                  Seed[]
+  timeline               TimelineEvent[]
+  bootstrapRequests      BootstrapRequest[]
+  storyBlueprints        StoryBlueprint[]
+  arcPlans               ArcPlan[]
+  chapterIntents         ChapterIntent[]
+  promptTemplates        PromptTemplate[]
+  promptTemplateVersions PromptTemplateVersion[]
+  qualityReports         QualityReport[]
+  continuityReports      ContinuityReport[]
+  fixTasks               FixTask[]
+  directorReviews        DirectorReview[]
+  experimentRuns         ExperimentRun[]
+  contextSnapshots       ContextSnapshot[]
+  agentRuns              AgentRun[]
+  adaptationArtifacts    AdaptationArtifact[]
+  resourceReferences     ResourceReference[]
 
   @@map("projects")
 }
 
 model StylePreset {
-  id              String   @id @default(uuid()) @db.Uuid
-  name            String
-  tone            String?
-  pacing          String?
-  dialogue_ratio  Float?
-  banned_words    String[]
-  preferred_words String[]
-  constraints     Json?
+  id                    String   @id @default(uuid()) @db.Uuid
+  name                  String
+  target_platform       String?
+  sentence_length       String?
+  paragraph_density     String?
+  dialogue_ratio_min    Float?
+  dialogue_ratio_max    Float?
+  exposition_limit      Float?
+  opening_hook_required Boolean  @default(true)
+  ending_hook_required  Boolean  @default(true)
+  tone                  String?
+  pacing                String?
+  dialogue_ratio        Float?
+  banned_words          String[]
+  preferred_words       String[]
+  taboo_rules           String[]
+  favored_devices       String[]
+  pacing_profile        String?
+  is_system             Boolean  @default(false)
+  constraints           Json?
 
   projects Project[]
 
@@ -121,7 +221,7 @@ model Character {
   motivation       String?
   secrets          String?
   abilities        Json?
-  catchphrases String[]
+  catchphrases     String[]
   created_at       DateTime @default(now())
   updated_at       DateTime @updatedAt
 
@@ -181,9 +281,44 @@ model GlossaryTerm {
   @@map("glossary_terms")
 }
 
+model SensitiveWord {
+  id         String   @id @default(uuid()) @db.Uuid
+  project_id String   @db.Uuid
+  term       String
+  replacement String?
+  severity   Severity @default(med)
+  notes      String?
+  enabled    Boolean  @default(true)
+  created_at DateTime @default(now())
+  updated_at DateTime @updatedAt
+
+  project Project @relation(fields: [project_id], references: [id], onDelete: Cascade)
+
+  @@index([project_id, enabled])
+  @@map("sensitive_words")
+}
+
+model RegexRule {
+  id          String   @id @default(uuid()) @db.Uuid
+  project_id  String   @db.Uuid
+  name        String
+  pattern     String
+  flags       String?
+  severity    Severity @default(med)
+  description String?
+  enabled     Boolean  @default(true)
+  created_at  DateTime @default(now())
+  updated_at  DateTime @updatedAt
+
+  project Project @relation(fields: [project_id], references: [id], onDelete: Cascade)
+
+  @@index([project_id, enabled])
+  @@map("regex_rules")
+}
+
 model Chapter {
-  id          String       @id @default(uuid()) @db.Uuid
-  project_id  String       @db.Uuid
+  id          String        @id @default(uuid()) @db.Uuid
+  project_id  String        @db.Uuid
   chapter_no  Int
   title       String?
   goal        String?
@@ -192,15 +327,25 @@ model Chapter {
   cliffhanger String?
   word_target Int?
   status      ChapterStatus @default(outline)
-  created_at  DateTime     @default(now())
-  updated_at  DateTime     @updatedAt
+  created_at  DateTime      @default(now())
+  updated_at  DateTime      @updatedAt
 
-  project                  Project                    @relation(fields: [project_id], references: [id], onDelete: Cascade)
-  versions                 ChapterVersion[]
-  memories                 ChapterMemory[]
-  consistencyReports       ConsistencyReport[]
+  project                    Project                     @relation(fields: [project_id], references: [id], onDelete: Cascade)
+  versions                   ChapterVersion[]
+  memories                   ChapterMemory[]
+  consistencyReports         ConsistencyReport[]
   generationContextSnapshots GenerationContextSnapshot[]
-  generationRequests       GenerationRequest[]
+  generationRequests         GenerationRequest[]
+  chapterIntents             ChapterIntent[]
+  qualityReports             QualityReport[]
+  continuityReports          ContinuityReport[]
+  fixTasks                   FixTask[]
+  directorReviews            DirectorReview[]
+  experimentRuns             ExperimentRun[]
+  contextSnapshots           ContextSnapshot[]
+  agentRuns                  AgentRun[]
+  adaptationArtifacts        AdaptationArtifact[]
+  resourceReferences         ResourceReference[]
 
   @@unique([project_id, chapter_no])
   @@index([project_id])
@@ -216,17 +361,28 @@ model ChapterVersion {
   text_hash         String
   parent_version_id String?      @db.Uuid
   created_at        DateTime     @default(now())
+  is_best           Boolean      @default(false)
+  manual_accepted   Boolean      @default(false)
   meta              Json?
 
-  chapter        Chapter            @relation(fields: [chapter_id], references: [id], onDelete: Cascade)
-  parentVersion  ChapterVersion?    @relation("VersionParent", fields: [parent_version_id], references: [id], onDelete: SetNull)
-  childVersions  ChapterVersion[]   @relation("VersionParent")
-  reports        ConsistencyReport[]
-  facts          Fact[]
-  seeds          Seed[]
-  timelineEvents TimelineEvent[]
-  chapterMemories ChapterMemory[]
-  generationRequests GenerationRequest[] @relation("ResponseVersion")
+  chapter             Chapter              @relation(fields: [chapter_id], references: [id], onDelete: Cascade)
+  parentVersion       ChapterVersion?      @relation("VersionParent", fields: [parent_version_id], references: [id], onDelete: SetNull)
+  childVersions       ChapterVersion[]     @relation("VersionParent")
+  reports             ConsistencyReport[]
+  facts               Fact[]
+  seeds               Seed[]
+  timelineEvents      TimelineEvent[]
+  chapterMemories     ChapterMemory[]
+  generationRequests  GenerationRequest[]  @relation("ResponseVersion")
+  qualityReports      QualityReport[]
+  continuityReports   ContinuityReport[]
+  baseFixTasks        FixTask[]            @relation("FixTaskBaseVersion")
+  targetFixTasks      FixTask[]            @relation("FixTaskTargetVersion")
+  directorReviews     DirectorReview[]
+  experimentVariants  ExperimentVariant[]  @relation("ExperimentGeneratedVersion")
+  agentRuns           AgentRun[]
+  adaptationArtifacts AdaptationArtifact[]
+  resourceReferences  ResourceReference[]
 
   @@unique([chapter_id, version_no])
   @@index([chapter_id])
@@ -234,18 +390,18 @@ model ChapterVersion {
 }
 
 model ChapterMemory {
-  id                       String   @id @default(uuid()) @db.Uuid
-  chapter_id               String   @db.Uuid
-  extracted_from_version_id String  @db.Uuid
-  summary                  String?
-  scene_list               Json?
-  character_state_snapshot Json?
-  needs_manual_review      Boolean  @default(false)
-  review_notes             String?
-  created_at               DateTime @default(now())
+  id                        String   @id @default(uuid()) @db.Uuid
+  chapter_id                String   @db.Uuid
+  extracted_from_version_id String   @db.Uuid
+  summary                   String?
+  scene_list                Json?
+  character_state_snapshot  Json?
+  needs_manual_review       Boolean  @default(false)
+  review_notes              String?
+  created_at                DateTime @default(now())
 
-  chapter   Chapter        @relation(fields: [chapter_id], references: [id], onDelete: Cascade)
-  version   ChapterVersion @relation(fields: [extracted_from_version_id], references: [id], onDelete: Cascade)
+  chapter Chapter        @relation(fields: [chapter_id], references: [id], onDelete: Cascade)
+  version ChapterVersion @relation(fields: [extracted_from_version_id], references: [id], onDelete: Cascade)
 
   @@index([chapter_id])
   @@map("chapter_memory")
@@ -265,11 +421,11 @@ model Fact {
   fingerprint            String
   status                 ExtractedStatus @default(extracted)
 
-  project Project        @relation(fields: [project_id], references: [id], onDelete: Cascade)
+  project       Project        @relation(fields: [project_id], references: [id], onDelete: Cascade)
   sourceVersion ChapterVersion @relation(fields: [source_version_id], references: [id], onDelete: Cascade)
 
-  @@index([project_id, chapter_no])
   @@unique([source_version_id, fingerprint])
+  @@index([project_id, chapter_no])
   @@map("facts")
 }
 
@@ -286,11 +442,11 @@ model Seed {
   fingerprint               String
   extraction_status         ExtractedStatus @default(extracted)
 
-  project Project           @relation(fields: [project_id], references: [id], onDelete: Cascade)
+  project       Project        @relation(fields: [project_id], references: [id], onDelete: Cascade)
   sourceVersion ChapterVersion @relation(fields: [source_version_id], references: [id], onDelete: Cascade)
 
-  @@index([project_id, planted_chapter_no, status])
   @@unique([source_version_id, fingerprint])
+  @@index([project_id, planted_chapter_no, status])
   @@map("seeds")
 }
 
@@ -305,24 +461,24 @@ model TimelineEvent {
   fingerprint       String
   status            ExtractedStatus @default(extracted)
 
-  project Project   @relation(fields: [project_id], references: [id], onDelete: Cascade)
+  project       Project         @relation(fields: [project_id], references: [id], onDelete: Cascade)
   sourceVersion ChapterVersion? @relation(fields: [source_version_id], references: [id], onDelete: Cascade)
 
-  @@index([project_id, chapter_no_ref])
   @@unique([source_version_id, fingerprint])
+  @@index([project_id, chapter_no_ref])
   @@map("timeline_events")
 }
 
 model ConsistencyReport {
-  id         String    @id @default(uuid()) @db.Uuid
-  chapter_id String    @db.Uuid
-  version_id String    @db.Uuid
+  id         String   @id @default(uuid()) @db.Uuid
+  chapter_id String   @db.Uuid
+  version_id String   @db.Uuid
   report     Json
   severity   Severity
-  created_at DateTime  @default(now())
+  created_at DateTime @default(now())
 
-  chapter Chapter @relation(fields: [chapter_id], references: [id], onDelete: Cascade)
-  version ChapterVersion @relation(fields: [version_id], references: [id], onDelete: Cascade)
+  chapter            Chapter             @relation(fields: [chapter_id], references: [id], onDelete: Cascade)
+  version            ChapterVersion      @relation(fields: [version_id], references: [id], onDelete: Cascade)
   generationRequests GenerationRequest[] @relation("ResponseReport")
 
   @@index([chapter_id])
@@ -330,15 +486,15 @@ model ConsistencyReport {
 }
 
 model GenerationContextSnapshot {
-  id             String      @id @default(uuid()) @db.Uuid
-  chapter_id     String      @db.Uuid
+  id             String       @id @default(uuid()) @db.Uuid
+  chapter_id     String       @db.Uuid
   stage          VersionStage
   context        Json
   trace_map      Json
   retriever_meta Json
   context_hash   String
   build_version  String
-  created_at     DateTime    @default(now())
+  created_at     DateTime     @default(now())
 
   chapter Chapter @relation(fields: [chapter_id], references: [id], onDelete: Cascade)
 
@@ -347,17 +503,17 @@ model GenerationContextSnapshot {
 }
 
 model GenerationRequest {
-  id                 String                  @id @default(uuid()) @db.Uuid
-  chapter_id         String                  @db.Uuid
-  stage              VersionStage
-  idempotency_key    String
-  request_hash       String
-  status             GenerationRequestStatus
-  response_version_id String?                @db.Uuid
-  response_report_id  String?                @db.Uuid
-  error_message      String?
-  created_at         DateTime                @default(now())
-  updated_at         DateTime                @updatedAt
+  id                  String                  @id @default(uuid()) @db.Uuid
+  chapter_id          String                  @db.Uuid
+  stage               VersionStage
+  idempotency_key     String
+  request_hash        String
+  status              GenerationRequestStatus
+  response_version_id String?                 @db.Uuid
+  response_report_id  String?                 @db.Uuid
+  error_message       String?
+  created_at          DateTime                @default(now())
+  updated_at          DateTime                @updatedAt
 
   chapter         Chapter            @relation(fields: [chapter_id], references: [id], onDelete: Cascade)
   responseVersion ChapterVersion?    @relation("ResponseVersion", fields: [response_version_id], references: [id], onDelete: SetNull)
@@ -388,20 +544,376 @@ model StoryOutlineNode {
 }
 
 model BootstrapRequest {
-  id                String                  @id @default(uuid()) @db.Uuid
-  project_id        String                  @db.Uuid
-  idempotency_key   String
-  request_hash      String
-  status            GenerationRequestStatus
-  response_chapter_id String?               @db.Uuid
+  id                  String                  @id @default(uuid()) @db.Uuid
+  project_id          String                  @db.Uuid
+  idempotency_key     String
+  request_hash        String
+  status              GenerationRequestStatus
+  response_chapter_id String?                 @db.Uuid
   response_chapter_no Int?
-  error_message     String?
-  created_at        DateTime                @default(now())
-  updated_at        DateTime                @updatedAt
+  error_message       String?
+  created_at          DateTime                @default(now())
+  updated_at          DateTime                @updatedAt
 
   project Project @relation(fields: [project_id], references: [id], onDelete: Cascade)
 
   @@unique([project_id, idempotency_key])
   @@index([project_id])
   @@map("project_bootstrap_requests")
+}
+
+model StoryBlueprint {
+  id                     String   @id @default(uuid()) @db.Uuid
+  project_id             String   @db.Uuid
+  version_no             Int
+  book_positioning       String?
+  genre                  String?
+  selling_points         String[]
+  target_platform        String?
+  target_readers         String?
+  pleasure_pacing        String?
+  main_conflict          String?
+  core_suspense          String?
+  character_relation_map Json?
+  world_rule_map         Json?
+  volume_structure       Json?
+  chapter_targets        Json?
+  created_at             DateTime @default(now())
+  updated_at             DateTime @updatedAt
+
+  project Project @relation(fields: [project_id], references: [id], onDelete: Cascade)
+
+  @@unique([project_id, version_no])
+  @@index([project_id])
+  @@map("story_blueprints")
+}
+
+model ArcPlan {
+  id                  String   @id @default(uuid()) @db.Uuid
+  project_id          String   @db.Uuid
+  arc_no              Int
+  title               String
+  summary             String?
+  mainline            String?
+  subline             String?
+  pacing_profile      String?
+  setup_payoff_map    Json?
+  twist_nodes         Json?
+  chapter_range_start Int?
+  chapter_range_end   Int?
+  created_at          DateTime @default(now())
+  updated_at          DateTime @updatedAt
+
+  project Project @relation(fields: [project_id], references: [id], onDelete: Cascade)
+
+  @@unique([project_id, arc_no])
+  @@index([project_id])
+  @@map("arc_plans")
+}
+
+model ChapterIntent {
+  id                   String   @id @default(uuid()) @db.Uuid
+  project_id           String   @db.Uuid
+  chapter_id           String   @db.Uuid
+  version_no           Int
+  chapter_mission      String
+  advance_goal         String?
+  conflict_target      String?
+  hook_target          String?
+  pacing_direction     String?
+  must_payoff_seed_ids String[]
+  notes                Json?
+  created_at           DateTime @default(now())
+  updated_at           DateTime @updatedAt
+
+  project Project @relation(fields: [project_id], references: [id], onDelete: Cascade)
+  chapter Chapter @relation(fields: [chapter_id], references: [id], onDelete: Cascade)
+
+  @@unique([chapter_id, version_no])
+  @@index([project_id, chapter_id])
+  @@map("chapter_intents")
+}
+
+model PromptTemplate {
+  id            String               @id @default(uuid()) @db.Uuid
+  project_id    String?              @db.Uuid
+  prompt_name   String
+  purpose       String
+  input_schema  Json?
+  output_schema Json?
+  status        PromptTemplateStatus @default(active)
+  created_at    DateTime             @default(now())
+  updated_at    DateTime             @updatedAt
+
+  project  Project?                @relation(fields: [project_id], references: [id], onDelete: Cascade)
+  versions PromptTemplateVersion[]
+
+  @@unique([project_id, prompt_name])
+  @@index([project_id])
+  @@map("prompt_templates")
+}
+
+model PromptTemplateVersion {
+  id                 String              @id @default(uuid()) @db.Uuid
+  project_id         String?             @db.Uuid
+  prompt_template_id String              @db.Uuid
+  prompt_version     Int
+  stage              PromptTemplateStage
+  platform_variant   String              @default("default")
+  template           String
+  system_template    String?
+  user_template      String?
+  input_contract     Json?
+  output_contract    Json?
+  ab_bucket          String?
+  is_active          Boolean             @default(true)
+  created_at         DateTime            @default(now())
+
+  project            Project?            @relation(fields: [project_id], references: [id], onDelete: Cascade)
+  promptTemplate     PromptTemplate      @relation(fields: [prompt_template_id], references: [id], onDelete: Cascade)
+  experimentVariants ExperimentVariant[] @relation("ExperimentPromptTemplateVersion")
+  agentRuns          AgentRun[]
+
+  @@unique([prompt_template_id, prompt_version, platform_variant])
+  @@index([project_id, stage])
+  @@map("prompt_template_versions")
+}
+
+model QualityReport {
+  id                 String   @id @default(uuid()) @db.Uuid
+  project_id         String   @db.Uuid
+  chapter_id         String   @db.Uuid
+  version_id         String   @db.Uuid
+  opening_hook       Float
+  conflict_strength  Float
+  pacing             Float
+  dialogue_quality   Float
+  character_voice    Float
+  scene_vividness    Float
+  exposition_control Float
+  ending_hook        Float
+  platform_fit       Float
+  overall_score      Float
+  summary            String?
+  report             Json
+  created_at         DateTime @default(now())
+
+  project Project        @relation(fields: [project_id], references: [id], onDelete: Cascade)
+  chapter Chapter        @relation(fields: [chapter_id], references: [id], onDelete: Cascade)
+  version ChapterVersion @relation(fields: [version_id], references: [id], onDelete: Cascade)
+
+  @@index([chapter_id, created_at])
+  @@map("quality_reports")
+}
+
+model ContinuityReport {
+  id                    String   @id @default(uuid()) @db.Uuid
+  project_id            String   @db.Uuid
+  chapter_id            String   @db.Uuid
+  version_id            String   @db.Uuid
+  world_rule_conflict   Json?
+  timeline_conflict     Json?
+  relationship_conflict Json?
+  character_ooc         Json?
+  seed_payoff_miss      Json?
+  overall_pass          Boolean  @default(true)
+  report                Json
+  created_at            DateTime @default(now())
+
+  project Project        @relation(fields: [project_id], references: [id], onDelete: Cascade)
+  chapter Chapter        @relation(fields: [chapter_id], references: [id], onDelete: Cascade)
+  version ChapterVersion @relation(fields: [version_id], references: [id], onDelete: Cascade)
+
+  @@index([chapter_id, created_at])
+  @@map("continuity_reports")
+}
+
+model FixTask {
+  id                String        @id @default(uuid()) @db.Uuid
+  project_id        String        @db.Uuid
+  chapter_id        String        @db.Uuid
+  base_version_id   String        @db.Uuid
+  target_version_id String?       @db.Uuid
+  issue_type        String
+  fix_goal          String
+  keep_elements     String[]
+  forbidden_changes String[]
+  target_intensity  String
+  strategy          String?
+  status            FixTaskStatus @default(pending)
+  input_payload     Json?
+  result_payload    Json?
+  created_at        DateTime      @default(now())
+  updated_at        DateTime      @updatedAt
+
+  project       Project         @relation(fields: [project_id], references: [id], onDelete: Cascade)
+  chapter       Chapter         @relation(fields: [chapter_id], references: [id], onDelete: Cascade)
+  baseVersion   ChapterVersion  @relation("FixTaskBaseVersion", fields: [base_version_id], references: [id], onDelete: Cascade)
+  targetVersion ChapterVersion? @relation("FixTaskTargetVersion", fields: [target_version_id], references: [id], onDelete: SetNull)
+
+  @@index([chapter_id, created_at])
+  @@map("fix_tasks")
+}
+
+model DirectorReview {
+  id                String           @id @default(uuid()) @db.Uuid
+  project_id        String           @db.Uuid
+  chapter_id        String           @db.Uuid
+  version_id        String           @db.Uuid
+  decision          DirectorDecision
+  should_regenerate Boolean          @default(false)
+  fix_plan          Json?
+  pacing_direction  String?
+  hook_upgrade      String?
+  arc_correction    String?
+  summary           String?
+  created_at        DateTime         @default(now())
+
+  project Project        @relation(fields: [project_id], references: [id], onDelete: Cascade)
+  chapter Chapter        @relation(fields: [chapter_id], references: [id], onDelete: Cascade)
+  version ChapterVersion @relation(fields: [version_id], references: [id], onDelete: Cascade)
+
+  @@index([chapter_id, created_at])
+  @@map("director_reviews")
+}
+
+model ExperimentRun {
+  id              String           @id @default(uuid()) @db.Uuid
+  project_id      String           @db.Uuid
+  chapter_id      String           @db.Uuid
+  experiment_type ExperimentType
+  status          ExperimentStatus @default(pending)
+  variant_a       Json?
+  variant_b       Json?
+  quality_score_a Float?
+  quality_score_b Float?
+  manual_score_a  Float?
+  manual_score_b  Float?
+  winner          String?
+  result          Json?
+  created_at      DateTime         @default(now())
+  updated_at      DateTime         @updatedAt
+
+  project  Project             @relation(fields: [project_id], references: [id], onDelete: Cascade)
+  chapter  Chapter             @relation(fields: [chapter_id], references: [id], onDelete: Cascade)
+  variants ExperimentVariant[]
+
+  @@index([chapter_id, created_at])
+  @@map("experiment_runs")
+}
+
+model ExperimentVariant {
+  id                         String   @id @default(uuid()) @db.Uuid
+  experiment_run_id          String   @db.Uuid
+  name                       String
+  prompt_template_version_id String?  @db.Uuid
+  generated_version_id       String?  @db.Uuid
+  model                      String?
+  retriever_strategy         String?
+  quality_score              Float?
+  manual_score               Float?
+  meta                       Json?
+  created_at                 DateTime @default(now())
+
+  experimentRun         ExperimentRun          @relation(fields: [experiment_run_id], references: [id], onDelete: Cascade)
+  promptTemplateVersion PromptTemplateVersion? @relation("ExperimentPromptTemplateVersion", fields: [prompt_template_version_id], references: [id], onDelete: SetNull)
+  generatedVersion      ChapterVersion?        @relation("ExperimentGeneratedVersion", fields: [generated_version_id], references: [id], onDelete: SetNull)
+
+  @@index([experiment_run_id])
+  @@map("experiment_variants")
+}
+
+model ContextSnapshot {
+  id                 String   @id @default(uuid()) @db.Uuid
+  project_id         String   @db.Uuid
+  chapter_id         String   @db.Uuid
+  stage              String
+  retriever_strategy String
+  tags               String[]
+  context_brief      Json
+  context_hash       String
+  created_at         DateTime @default(now())
+
+  project Project @relation(fields: [project_id], references: [id], onDelete: Cascade)
+  chapter Chapter @relation(fields: [chapter_id], references: [id], onDelete: Cascade)
+
+  @@index([chapter_id, created_at])
+  @@map("context_snapshots")
+}
+
+model AgentRun {
+  id                 String   @id @default(uuid()) @db.Uuid
+  run_id             String
+  project_id         String   @db.Uuid
+  chapter_id         String?  @db.Uuid
+  version_id         String?  @db.Uuid
+  agent_name         String
+  prompt_name        String?
+  prompt_version     String?
+  prompt_template_version_id String? @db.Uuid
+  platform_variant   String?
+  model              String?
+  style_preset       String?
+  retriever_strategy String?
+  context_hash       String?
+  token_usage        Json?
+  quality_score      Float?
+  input_payload      Json?
+  output_payload     Json?
+  created_at         DateTime @default(now())
+
+  project Project         @relation(fields: [project_id], references: [id], onDelete: Cascade)
+  chapter Chapter?        @relation(fields: [chapter_id], references: [id], onDelete: SetNull)
+  version ChapterVersion? @relation(fields: [version_id], references: [id], onDelete: SetNull)
+  promptTemplateVersion PromptTemplateVersion? @relation(fields: [prompt_template_version_id], references: [id], onDelete: SetNull)
+
+  @@index([project_id, chapter_id, created_at])
+  @@index([run_id])
+  @@index([prompt_template_version_id])
+  @@map("agent_runs")
+}
+
+model AdaptationArtifact {
+  id                String         @id @default(uuid()) @db.Uuid
+  project_id        String         @db.Uuid
+  chapter_id        String         @db.Uuid
+  source_version_id String?        @db.Uuid
+  adaptation_type   AdaptationType
+  title             String?
+  content           Json
+  meta              Json?
+  created_at        DateTime       @default(now())
+
+  project       Project         @relation(fields: [project_id], references: [id], onDelete: Cascade)
+  chapter       Chapter         @relation(fields: [chapter_id], references: [id], onDelete: Cascade)
+  sourceVersion ChapterVersion? @relation(fields: [source_version_id], references: [id], onDelete: SetNull)
+
+  @@index([chapter_id, adaptation_type, created_at])
+  @@map("adaptation_artifacts")
+}
+
+model ResourceReference {
+  id               String                  @id @default(uuid()) @db.Uuid
+  project_id       String                  @db.Uuid
+  chapter_id       String                  @db.Uuid
+  version_id       String?                 @db.Uuid
+  resource_type    ResourceType
+  resource_id      String                  @db.Uuid
+  state            ResourceReferenceState  @default(inferred)
+  origin           ResourceReferenceOrigin @default(extractor)
+  confidence       Float?
+  occurrence_count Int                     @default(0)
+  evidence_json    Json?
+  created_at       DateTime                @default(now())
+  updated_at       DateTime                @updatedAt
+
+  project Project         @relation(fields: [project_id], references: [id], onDelete: Cascade)
+  chapter Chapter         @relation(fields: [chapter_id], references: [id], onDelete: Cascade)
+  version ChapterVersion? @relation(fields: [version_id], references: [id], onDelete: SetNull)
+
+  @@unique([chapter_id, resource_type, resource_id])
+  @@index([project_id, resource_type, resource_id])
+  @@index([chapter_id, state])
+  @@index([version_id])
+  @@map("resource_references")
 }

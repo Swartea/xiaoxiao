@@ -25,6 +25,9 @@ describe("buildGenerationContext", () => {
       facts: [item("f1", { fact_id: "f1", content: "灵核会衰减", chapter_no: 1 }, "facts", 8)],
       seeds: [item("sd1", { seed_id: "sd1", content: "古钟异动", status: "planted", planted_chapter_no: 1 }, "seeds", 8)],
       timeline: [item("t1", { event_id: "t1", time_mark: "第1夜", event: "钟鸣", chapter_no_ref: 1 }, "timeline_events", 8)],
+      sensitiveWords: [item("sw1", { term: "禁词", replacement: "替代表达", severity: "med" }, "sensitive_words", 10)],
+      regexRules: [item("rr1", { name: "数字规则", pattern: "\\d{8,}", flags: "g", severity: "high" }, "regex_rules", 10)],
+      referencedResources: [{ resource_type: "character", resource_id: "c1", state: "confirmed" }],
       retrieverMeta: {
         k: 50,
         query_entities: ["林川"],
@@ -38,5 +41,7 @@ describe("buildGenerationContext", () => {
     expect(result.context.trace_map.length).toBeGreaterThan(0);
     expect(result.contextHash).toHaveLength(64);
     expect(result.retrieverMeta.k).toBe(50);
+    expect(result.context.safety_rules).toHaveLength(2);
+    expect(result.context.referenced_resources).toHaveLength(1);
   });
 });

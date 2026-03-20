@@ -28,6 +28,12 @@ function summarizeSeverity(issues: ContinuityIssue[]) {
   return summary;
 }
 
+function normalizeSeverity(value?: string | null): "low" | "med" | "high" {
+  if (value === "high") return "high";
+  if (value === "med" || value === "medium") return "med";
+  return "low";
+}
+
 export function runContinuityCheck(input: ContinuityCheckInput): ContinuityReport {
   const issues: ContinuityIssue[] = [];
 
@@ -51,6 +57,89 @@ export function runContinuityCheck(input: ContinuityCheckInput): ContinuityRepor
         ),
       );
     }
+  }
+
+  for (const sensitiveWord of input.sensitive_words ?? []) {
+    if (!sensitiveWord.term || !input.text.includes(sensitiveWord.term)) {
+      continue;
+    }
+
+    const evidence = findEvidence(input.text, sensitiveWord.term);
+    issues.push(
+      createIssue(
+        {
+          type: "sensitive_word_hit",
+          severity: normalizeSeverity(sensitiveWord.severity),
+          message: sensitiveWord.replacement
+            ? `命中敏感词“${sensitiveWord.term}”，建议替换为“${sensitiveWord.replacement}”`
+            : `命中敏感词“${sensitiveWord.term}”`,
+          evidence: {
+            version_id: input.versionId,
+            text_hash: input.textHash,
+            ...evidence,
+          },
+          suggested_fix: sensitiveWord.replacement
+            ? `将 ${sensitiveWord.term} 替换为 ${sensitiveWord.replacement}`
+            : "删除或改写该敏感表述",
+        },
+        issues.length,
+      ),
+    );
+  }
+
+  for (const regexRule of input.regex_rules ?? []) {
+    try {
+      const pattern = new RegExp(regexRule.pattern, regexRule.flags ?? "");
+      const match = pattern.exec(input.text);
+      if (!match?.[0]) {
+        continue;
+      }
+
+      const evidence = findEvidence(input.text, match[0]);
+      issues.push(
+        createIssue(
+          {
+            type: "regex_rule_hit",
+            severity: normalizeSeverity(regexRule.severity),
+            message: `命中规则“${regexRule.name}”`,
+            evidence: {
+              version_id: input.versionId,
+              text_hash: input.textHash,
+              ...evidence,
+            },
+            suggested_fix: `按规则 ${regexRule.name} 修正文案`,
+          },
+          issues.length,
+        ),
+      );
+    } catch {
+      continue;
+    }
+  }
+
+  for (const reference of input.confirmed_references ?? []) {
+    const name = reference.name.trim();
+    if (!name || input.text.includes(name)) {
+      continue;
+    }
+
+    const evidence = findEvidence(input.text, name);
+    issues.push(
+      createIssue(
+        {
+          type: "confirmed_reference_missing",
+          severity: "low",
+          message: `已确认引用的${reference.type}“${name}”未在正文中出现`,
+          evidence: {
+            version_id: input.versionId,
+            text_hash: input.textHash,
+            ...evidence,
+          },
+          suggested_fix: `补入 ${name} 的有效出场，或将该引用状态改为 inferred/ignored`,
+        },
+        issues.length,
+      ),
+    );
   }
 
   for (const character of input.characters) {

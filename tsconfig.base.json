@@ -15,7 +15,9 @@
     "paths": {
       "@novel-factory/shared": ["packages/shared/src"],
       "@novel-factory/llm": ["packages/llm/src"],
-      "@novel-factory/memory": ["packages/memory/src"]
+      "@novel-factory/memory": ["packages/memory/src"],
+      "@novel-factory/storyos-domain": ["packages/storyos-domain/src"],
+      "@novel-factory/storyos-prompts": ["packages/storyos-prompts/src"]
     }
   }
 }

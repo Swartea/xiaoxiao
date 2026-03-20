@@ -4,6 +4,7 @@ import { createHash } from "node:crypto";
 import { Prisma, VersionStage } from "@prisma/client";
 import { PrismaService } from "../prisma.service";
 import { CreateChapterDto, RollbackChapterDto } from "./dto";
+import { summarizeVersionMeta } from "./version-meta.util";
 
 function textHash(text: string): string {
   return createHash("sha256").update(text).digest("hex");
@@ -222,6 +223,21 @@ export class ChaptersService {
     });
   }
 
+  async getChapterByNo(projectId: string, chapterNo: number) {
+    const chapter = await this.prisma.chapter.findFirst({
+      where: {
+        project_id: projectId,
+        chapter_no: chapterNo,
+      },
+    });
+
+    if (!chapter) {
+      throw new NotFoundException("Chapter not found");
+    }
+
+    return chapter;
+  }
+
   async getChapter(chapterId: string) {
     const chapter = await this.prisma.chapter.findUnique({
       where: { id: chapterId },
@@ -244,9 +260,9 @@ export class ChaptersService {
     return chapter;
   }
 
-  getVersions(chapterId: string, options?: { metaOnly?: boolean }) {
+  async getVersions(chapterId: string, options?: { metaOnly?: boolean }) {
     if (options?.metaOnly) {
-      return this.prisma.chapterVersion.findMany({
+      const versions = await this.prisma.chapterVersion.findMany({
         where: { chapter_id: chapterId },
         orderBy: { version_no: "desc" },
         select: {
@@ -254,8 +270,12 @@ export class ChaptersService {
           version_no: true,
           stage: true,
           created_at: true,
+          parent_version_id: true,
+          meta: true,
         },
       });
+
+      return versions.map((version) => summarizeVersionMeta(version));
     }
 
     return this.prisma.chapterVersion.findMany({

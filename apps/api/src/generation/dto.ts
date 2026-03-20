@@ -15,6 +15,18 @@ export class GenerateStageDto {
   @Min(20)
   @Max(50)
   k?: number;
+
+  @IsOptional()
+  @IsUUID()
+  prompt_template_version_id?: string;
+
+  @IsOptional()
+  @IsString()
+  platform_variant?: string;
+
+  @IsOptional()
+  @IsString()
+  style_preset_name?: string;
 }
 
 export class CheckContinuityDto {

@@ -20,6 +20,8 @@
     "@nestjs/platform-express": "^11.0.12",
     "@novel-factory/llm": "workspace:*",
     "@novel-factory/memory": "workspace:*",
+    "@novel-factory/storyos-domain": "workspace:*",
+    "@novel-factory/storyos-prompts": "workspace:*",
     "@novel-factory/shared": "workspace:*",
     "@prisma/client": "^6.4.1",
     "class-transformer": "^0.5.1",

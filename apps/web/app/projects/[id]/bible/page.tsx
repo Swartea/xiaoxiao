@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
@@ -327,7 +328,39 @@ export default function BiblePage({ params }: Props) {
   return (
     <main className="mx-auto max-w-7xl p-8">
       <ProjectNav id={projectId} />
-      <h1 className="font-heading text-3xl">故事设定</h1>
+      <h1 className="font-heading text-3xl">人物与故事设定</h1>
+
+      <Card className="mt-4 border-slate-200 bg-slate-50/80">
+        <div className="flex flex-wrap items-start justify-between gap-4">
+          <div>
+            <p className="text-sm font-semibold text-slate-900">人物编辑已统一收口到这里</p>
+            <p className="mt-1 text-xs text-slate-600">
+              人物新增、设定修改都在当前页面完成；人物图谱页只保留引用热度、章节痕迹和关系网络，减少双入口重复维护。
+            </p>
+          </div>
+          <div className="flex flex-wrap gap-2 text-sm">
+            <Link
+              href={`/projects/${projectId}/characters`}
+              className="rounded-md border border-slate-200 bg-white px-3 py-2 text-slate-700 hover:bg-slate-100"
+            >
+              查看人物图谱
+            </Link>
+            <Link
+              href={`/projects/${projectId}/relationships`}
+              className="rounded-md border border-slate-200 bg-white px-3 py-2 text-slate-700 hover:bg-slate-100"
+            >
+              查看关系图谱
+            </Link>
+          </div>
+        </div>
+
+        <div className="mt-4 grid gap-2 text-sm text-slate-700 md:grid-cols-4">
+          <div className="rounded-lg bg-white px-3 py-2">人物数: {bible.characters.length}</div>
+          <div className="rounded-lg bg-white px-3 py-2">关系数: {bible.relationships.length}</div>
+          <div className="rounded-lg bg-white px-3 py-2">术语数: {bible.glossary.length}</div>
+          <div className="rounded-lg bg-white px-3 py-2">时间线节点: {bible.timeline.length}</div>
+        </div>
+      </Card>
 
       <div className="mt-4 flex flex-wrap items-center gap-2">
         <Button variant={mode === "form" ? "default" : "ghost"} onClick={() => setMode("form")}>可视化编辑</Button>
@@ -352,9 +385,17 @@ export default function BiblePage({ params }: Props) {
         <Card>
           {mode === "form" ? (
             <div className="space-y-6">
-              <section>
+              <section id="characters">
                 <h2 className="font-medium">人物表</h2>
-                <p className="mt-1 text-xs text-black/60">快速输入人物名（用逗号、顿号或换行分隔）</p>
+                <p className="mt-1 text-xs text-black/60">
+                  人物资料统一在这里维护；引用热度和出场关系可去
+                  {" "}
+                  <Link className="text-sky-700 underline-offset-2 hover:underline" href={`/projects/${projectId}/characters`}>
+                    人物图谱
+                  </Link>
+                  {" "}
+                  查看。
+                </p>
                 <div className="mt-2 flex gap-2">
                   <input
                     className="flex-1 rounded border border-black/20 px-2 py-1 text-sm"
